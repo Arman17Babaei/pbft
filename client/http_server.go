@@ -1,0 +1,83 @@
+package client
+
+import (
+	"fmt"
+	"net/http"
+
+	log "github.com/sirupsen/logrus"
+	pb "github.com/Arman17Babaei/pbft/proto"
+)
+
+type HttpServer struct {
+	config *Config
+	client *Client
+}
+
+func NewHttpServer(config *Config, client *Client) *HttpServer {
+	return &HttpServer{
+		config: config,
+		client: client,
+	}
+}
+
+func (h *HttpServer) Serve() {
+	h.MakeHandlers()
+
+	hostAddress := fmt.Sprintf("%s:%d", h.config.HttpAddress.Host, h.config.HttpAddress.Port)
+	log.WithField("address", hostAddress).Info("starting HTTP server on port...")
+	if err := http.ListenAndServe(hostAddress, nil); err != nil {
+		log.WithError(err).Error("error starting server", err)
+	}
+}
+
+func (h *HttpServer) MakeHandlers() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "client/node.html")
+	})
+
+	http.HandleFunc("/get", func(w http.ResponseWriter, r *http.Request) {
+		op := &pb.Operation{Type: pb.Operation_GET}
+		resultCh := make(chan *pb.OperationResult)
+		h.client.SendRequest(op, resultCh)
+		result := <-resultCh
+		fmt.Fprint(w, result.Value)
+	})
+
+	http.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			log.WithField("method", r.Method).Error("invalid method (!= POST)")
+			http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			log.WithError(err).Error("failed to parse form")
+			http.Error(w, "failed to parse form", http.StatusBadRequest)
+			return
+		}
+
+		op := &pb.Operation{Type: pb.Operation_ADD, Value: r.FormValue("value")}
+		resultCh := make(chan *pb.OperationResult)
+		h.client.SendRequest(op, resultCh)
+		result := <-resultCh
+		fmt.Fprint(w, result.Value)
+	})
+
+	http.HandleFunc("/sub", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			log.WithField("method", r.Method).Error("invalid method (!= POST)")
+			http.Error(w, "invalid method", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			log.WithError(err).Error("failed to parse form")
+			http.Error(w, "failed to parse form", http.StatusBadRequest)
+			return
+		}
+
+		op := &pb.Operation{Type: pb.Operation_SUB, Value: r.FormValue("value")}
+		resultCh := make(chan *pb.OperationResult)
+		h.client.SendRequest(op, resultCh)
+		result := <-resultCh
+		fmt.Fprint(w, result.Value)
+	})
+}

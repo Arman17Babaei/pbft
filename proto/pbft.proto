@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package pbft;
+option go_package = ".";
+
+message ClientRequest {
+    string client_id = 1; // Unique identifier for the client
+    int64 timestamp_ms = 2;        // Unique identifier for the request
+    Operation operation = 3;        // Operation to be performed
+    string callback = 4;         // Callback endpoint for the client
+}
+
+message Operation {
+    enum Type {
+        GET = 0;
+        ADD = 1;
+        SUB = 2;
+    }
+
+    Type type = 1;             // Type of operation
+    string key = 2;              // Key for the operation
+    string value = 3;            // Value for the operation
+}
+
+message PiggyBackedPrePareRequest {
+    PrePrepareRequest pre_prepare_request = 1; // PrePrepare request
+    repeated ClientRequest requests = 2;      // Batched requests
+}
+
+// Pre-prepare phase message
+message PrePrepareRequest {
+    int64 view_id = 1;          // View identifier
+    int64 sequence_number = 2;   // Sequence number for the request
+    string request_digest = 3;   // Digest of the request
+}
+
+// Prepare phase message
+message PrepareRequest {
+    int64 view_id = 1;          // View identifier
+    int64 sequence_number = 2;   // Sequence number for the request
+    string request_digest = 3;
+    string replica_id = 4;
+}
+
+// Commit phase message
+message CommitRequest {
+    int64 view_id = 1;          // View identifier
+    int64 sequence_number = 2;   // Sequence number for the request
+    string request_digest = 3;
+    string replica_id = 4;
+}
+
+// Checkpoint message
+message CheckpointRequest {
+    int64 sequence_number = 1;  // Sequence number for the checkpoint
+    bytes state_digest = 2;      // Digest of the state at the checkpoint
+    string replica_id = 3;        // Identifier of the replica that sent the checkpoint
+}
+
+// View change message
+message ViewChangeRequest {
+    int64 new_view_id = 1;      // Proposed new view identifier
+    int64 last_stable_sequence_number = 2; // Last stable checkpoint
+    repeated CheckpointRequest checkpoint_proof = 3;
+    repeated ViewChangePreparedMessage prepared_proof = 4;
+    string replica_id = 5;       // Identifier of the replica that sent the view change
+}
+
+message ViewChangePreparedMessage {
+    PrePrepareRequest pre_prepare_request = 1; // PrePrepare request
+    repeated PrepareRequest prepared_messages = 3; // Prepared messages for new view
+}
+
+message NewViewRequest {
+    int64 new_view_id = 1;      // Proposed new view identifier
+    repeated ViewChangeRequest view_change_proof = 2;
+    repeated PrePrepareRequest preprepares = 3;
+    string replica_id = 4;       // Identifier of the replica that sent the new view
+}
+
+message Empty {
+}
+
+// gRPC service definition
+service Pbft {
+    // Send a client request
+    rpc Request(ClientRequest) returns (Empty);
+
+    // Send a PrePrepare message
+    rpc PrePrepare(PiggyBackedPrePareRequest) returns (Empty);
+
+    // Send a Prepare message
+    rpc Prepare(PrepareRequest) returns (Empty);
+
+    // Send a Commit message
+    rpc Commit(CommitRequest) returns (Empty);
+
+    // Send a Checkpoint message
+    rpc Checkpoint(CheckpointRequest) returns (Empty);
+
+    // Initiate a view change
+    rpc ViewChange(ViewChangeRequest) returns (Empty);
+
+    // Send a NewView message
+    rpc NewView(NewViewRequest) returns (Empty);
+}

@@ -1,0 +1,31 @@
+id: node_0
+
+address:
+  host: "0.0.0.0"
+  port: 5001
+
+peers_address:
+  node_0:
+    host: "0.0.0.0"
+    port: 5001
+  node_1:
+    host: "0.0.0.0"
+    port: 5002
+  node_2:
+    host: "0.0.0.0"
+    port: 5003
+  node_3:
+    host: "0.0.0.0"
+    port: 5004
+
+grpc:
+  send_timeout_ms: 1000
+  max_concurrent_streams: 30
+
+timers:
+  view_change_timeout_ms: 30000
+
+general:
+  max_outstanding_requests: 100
+  checkpoint_interval: 100
+  water_mark_interval: 200

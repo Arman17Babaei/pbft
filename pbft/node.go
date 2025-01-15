@@ -1,456 +1,554 @@
 package pbft
 
 import (
-	"fmt"
-	"log"
-	"math/rand"
-	"sort"
 	"sync"
 	"time"
 
-	pb "github.com/Arman17Babaei/pbft/grpc/proto"
-	"github.com/google/uuid"
+	pb "github.com/Arman17Babaei/pbft/proto"
+	log "github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/proto"
 )
-
-const SEND_TIMEOUT = 400 * time.Millisecond
-const HEARTBEAT_INTERVAL = 600 * time.Millisecond
-
-var ELECTION_TIMEOUT = 1500*time.Millisecond + (time.Duration(rand.Int()%500) * time.Millisecond)
 
 type Role string
 
 const (
-	Follower  Role = "Follower"
-	Candidate Role = "Candidate"
-	Leader    Role = "Leader"
+	Primary Role = "Primary"
+	Backup  Role = "Backup"
 )
 
-type Request struct {
-	Command  string
-	Callback chan bool
-}
-
 type Node struct {
-	Mu          sync.Mutex
-	Id          int            // Unique ID for the node
-	Role        Role           // Current role: Follower, Candidate, or Leader
-	CurrentTerm int            // Latest term seen
-	VotedFor    *int           // Candidate ID voted for in the current term
-	Log         []*pb.LogEntry // Log entries
-	CommitIndex int            // Index of the highest log entry known to be committed
-	LastApplied int            // Index of the highest log entry applied to the state machine
-	NextIndex   map[int]int    // For Leader: next log index to send to each follower
-	MatchIndex  map[int]int    // For Leader: highest log entry index known to be replicated on each follower
+	Mu      sync.Mutex
+	Config  *Config
+	Sender  *Sender
+	Role    Role
+	Store   *Store
+	InputCh <-chan proto.Message
 
-	Peers       []int // IDs of other nodes in the cluster
-	Votes       int
-	HeartbeatCh chan bool
-	LeaderId    *int
+	LeaderElection LeaderElection
 
-	RequestCh chan Request
-	CommandCh chan string
-	PleaseCh  chan *pb.RequestPleaseRequest
-	Callbacks map[string]chan bool
+	RunningTimer    bool
+	ViewChangeTimer *time.Timer
+	IsInViewChange  bool
+	ViewChanges     map[int64]map[string]*pb.ViewChangeRequest
+
+	Preprepares map[int64]*pb.PrePrepareRequest
+	Prepares    map[int64]map[string]*pb.PrepareRequest
+	Commits     map[int64]map[string]*pb.CommitRequest
+
+	PendingRequests    []*pb.ClientRequest
+	InProgressRequests int
+
+	CurrentView        int64
+	LeaderId           string
+	LastSequenceNumber int64
 }
 
-func NewNode(id int, others []int, requestCh chan Request, commandCh chan string, pleaseCh chan *pb.RequestPleaseRequest) *Node {
-	node := &Node{
-		Id:          id,
-		Role:        Follower,
-		CurrentTerm: 0,
-		VotedFor:    nil,
-		Log:         make([]*pb.LogEntry, 0),
-		CommitIndex: -1,
-		LastApplied: -1,
-		NextIndex:   make(map[int]int),
-		MatchIndex:  make(map[int]int),
-
-		Peers:       others,
-		Votes:       0,
-		HeartbeatCh: make(chan bool),
-		LeaderId:    nil,
-
-		RequestCh: requestCh,
-		CommandCh: commandCh,
-		PleaseCh:  pleaseCh,
-		Callbacks: make(map[string]chan bool, 0),
+func NewNode(config *Config, sender *Sender, inputCh <-chan proto.Message) *Node {
+	leaderElection := NewRoundRobinLeaderElection(config)
+	role := Backup
+	if leaderElection.GetLeader(0) == config.Id {
+		role = Primary
 	}
-	for _, peer := range others {
-		node.NextIndex[peer] = 0
-		node.MatchIndex[peer] = -1
-	}
-	go node.listenForRequests()
-	go node.waitForElection()
-	return node
-}
+	return &Node{
+		Config:  config,
+		Sender:  sender,
+		Role:    role,
+		Store:   NewStore(config),
+		InputCh: inputCh,
 
-func (n *Node) StartElection() {
-	n.Mu.Lock()
-	defer n.Mu.Unlock()
+		LeaderElection: leaderElection,
 
-	log.Printf("[Node %d] Starting election for term %d", n.Id, n.CurrentTerm+1)
-	n.Role = Candidate
-	n.CurrentTerm++
-	n.VotedFor = &n.Id
-	n.Votes = 1 // Vote for self
+		RunningTimer:    false,
+		IsInViewChange:  false,
+		ViewChanges:     make(map[int64]map[string]*pb.ViewChangeRequest),
 
-	for _, peer := range n.Peers {
-		go n.sendRequestVote(peer)
+		Preprepares: make(map[int64]*pb.PrePrepareRequest),
+		Prepares:    make(map[int64]map[string]*pb.PrepareRequest),
+		Commits:     make(map[int64]map[string]*pb.CommitRequest),
+
+		PendingRequests:    []*pb.ClientRequest{},
+		InProgressRequests: 0,
+
+		CurrentView: 0,
+		LeaderId:    leaderElection.GetLeader(0),
 	}
 }
 
-func (n *Node) getLastLogTerm() int {
-	if len(n.Log) == 0 {
-		return 0
-	}
-	return int(n.Log[len(n.Log)-1].Term)
-}
+func (n *Node) Run() {
+	n.ViewChangeTimer = time.NewTimer(time.Second)
+	n.ViewChangeTimer.Stop()
 
-func (n *Node) sendRequestVote(peerID int) {
-	// Prepare and send a RequestVote RPC
-	request := &pb.RequestVoteRequest{
-		Term:         int32(n.CurrentTerm),
-		CandidateID:  int32(n.Id),
-		LastLogIndex: int32(len(n.Log) - 1),
-		LastLogTerm:  int32(n.getLastLogTerm()),
-	}
-	response, err := SendRPCToPeer(peerID, "RequestVote", request) // Implement sendRPCToPeer
-	if err != nil {
-		// log.Printf("[Node %d] Failed to contact peer %d: %v", n.Id, peerID, err)
-		return
-	}
-
-	// Process the vote response
-	// log.Printf("[Node %d] Received vote response from %d: %+v", n.Id, peerID, response)
-	n.processVoteResponse(response.(*pb.RequestVoteResponse))
-}
-
-func (n *Node) processVoteResponse(response *pb.RequestVoteResponse) {
-	n.Mu.Lock()
-	defer n.Mu.Unlock()
-
-	if int(response.Term) > n.CurrentTerm {
-		n.LeaderId = nil
-		n.becomeFollower(int(response.Term))
-		return
-	}
-
-	if response.VoteGranted {
-		n.Votes++
-		if n.Votes >= len(n.Peers)/2 {
-			n.becomeLeader()
-		}
-	}
-
-	log.Printf("[Node %d] Votes: %d", n.Id, n.Votes)
-}
-
-func (n *Node) becomeFollower(term int) {
-	log.Printf("[Node %d] Becoming follower for term %d", n.Id, term)
-	n.Role = Follower
-	n.CurrentTerm = term
-	n.VotedFor = nil
-}
-
-func (n *Node) becomeLeader() {
-	if n.Role == Leader {
-		return
-	}
-
-	log.Printf("[Node %d] Becoming leader for term %d", n.Id, n.CurrentTerm)
-	n.Role = Leader
-	n.LeaderId = &n.Id
-	n.startHeartbeat()
-}
-
-func (n *Node) waitForElection() {
 	for {
 		select {
-		case <-time.After(ELECTION_TIMEOUT):
-			if n.Role != Leader {
-				n.StartElection()
-			}
-		case <-n.HeartbeatCh:
-			n.becomeFollower(n.CurrentTerm)
+		case input := <-n.InputCh:
+			n.handleInput(input)
+		case <-n.ViewChangeTimer.C:
+			n.RunningTimer = false
+			n.goToViewChange()
 		}
 	}
 }
 
-func (n *Node) startHeartbeat() {
-	ticker := time.NewTicker(HEARTBEAT_INTERVAL)
-	go func() {
-		for range ticker.C {
-			if n.Role != Leader {
-				ticker.Stop()
-				return
-			}
-			n.broadcastAppendEntries()
-		}
-	}()
-}
-
-func (n *Node) broadcastAppendEntries() {
-	for _, peer := range n.Peers {
-		go n.sendAppendEntries(peer)
-	}
-}
-
-func (n *Node) sendAppendEntries(peerID int) {
-	n.Mu.Lock()
-
-	// Prepare AppendEntries RPC
-	prevLogIndex := n.NextIndex[peerID] - 1
-	// log.Printf("[Node %d] Sending logs: %v", n.Id, n.Log)
-	request := &pb.AppendEntriesRequest{
-		Term:         int32(n.CurrentTerm),
-		LeaderID:     int32(n.Id),
-		PrevLogIndex: int32(prevLogIndex),
-		PrevLogTerm:  int32(n.getLogTerm(prevLogIndex)),
-		Entries:      n.Log[n.NextIndex[peerID]:],
-		LeaderCommit: int32(n.CommitIndex),
-	}
-
-	n.Mu.Unlock()
-
-	response, err := SendRPCToPeer(peerID, "AppendEntries", request) // Implement sendRPCToPeer
-	if err != nil {
-		// log.Printf("[Node %d] Failed to send AppendEntries to peer %d: %v", n.Id, peerID, err)
+func (n *Node) setViewChangeTimer() {
+	if n.Role == Primary {
+		n.RunningTimer = false
+		n.ViewChangeTimer.Stop()
 		return
 	}
 
-	n.processAppendEntriesResponse(peerID, response.(*pb.AppendEntriesResponse))
+	n.RunningTimer = true
+	n.ViewChangeTimer.Stop()
+	n.ViewChangeTimer.Reset(time.Duration(n.Config.Timers.ViewChangeTimeoutMs) * time.Millisecond)
 }
 
-func (n *Node) processAppendEntriesResponse(peerID int, response *pb.AppendEntriesResponse) {
-	n.Mu.Lock()
-	defer n.Mu.Unlock()
+func (n *Node) handleInput(input proto.Message) {
+	switch msg := input.(type) {
+	case *pb.ClientRequest:
+		n.handleClientRequest([]*pb.ClientRequest{msg})
+	case *pb.PiggyBackedPrePareRequest:
+		n.handlePrePrepareRequest(msg)
+	case *pb.PrepareRequest:
+		n.handlePrepareRequest(msg)
+	case *pb.CommitRequest:
+		n.handleCommitRequest(msg)
+	case *pb.CheckpointRequest:
+		n.handleCheckpointRequest(msg)
+	case *pb.ViewChangeRequest:
+		n.handleViewChangeRequest(msg)
+	case *pb.NewViewRequest:
+		n.handleNewViewRequest(msg)
+	}
+}
 
-	// log.Printf("[Node %d] Received AppendEntries response from %d: %+v", n.Id, peerID, response)
+func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
+	if n.Role != Primary {
+		log.WithField("request", msgs[0].String()).Warn("Received client request but not primary")
+		log.WithField("leader", n.LeaderId).Info("Forwarding request to leader")
+		for _, msg := range msgs {
+			n.Sender.SendRPCToPeer(n.LeaderId, "Request", msg)
+		}
 
-	if int(response.Term) > n.CurrentTerm {
-		n.becomeFollower(int(response.Term))
+		if !n.RunningTimer && !n.IsInViewChange {
+			n.setViewChangeTimer()
+		}
+
 		return
 	}
 
-	if response.Success {
-		// Update nextIndex and matchIndex for the follower
-		n.NextIndex[peerID] = len(n.Log)
-		n.MatchIndex[peerID] = len(n.Log) - 1
-		// log.Printf("[Node %d] Updated nextIndex and matchIndex for %d: %d %d", n.Id, peerID, n.NextIndex[peerID], n.MatchIndex[peerID])
+	if n.IsInViewChange {
+		log.Warn("Dismissing commit because in view change")
+		return
+	}
 
-		// Update commitIndex if a majority agrees
-		n.updateCommitIndex()
-	} else {
-		// Decrement nextIndex and retry
-		n.NextIndex[peerID]--
+	log.WithField("request", msgs[0].String()).Info("Received client request")
+
+	if n.InProgressRequests >= n.Config.General.MaxOutstandingRequests {
+		log.Warn("Too many outstanding requests, putting request in pending queue")
+		n.PendingRequests = append(n.PendingRequests, msgs...)
+		return
+	}
+
+	n.LastSequenceNumber++
+	n.InProgressRequests++
+	prepreareMessage := &pb.PiggyBackedPrePareRequest{
+		PrePrepareRequest: &pb.PrePrepareRequest{
+			ViewId:         n.CurrentView,
+			SequenceNumber: n.LastSequenceNumber,
+		},
+		Requests: msgs,
+	}
+	n.Preprepares[int64(n.LastSequenceNumber)] = prepreareMessage.PrePrepareRequest
+
+	n.Store.AddRequests(int64(n.LastSequenceNumber), msgs)
+	n.Sender.Broadcast("PrePrepare", prepreareMessage)
+}
+
+func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
+	if n.Role == Primary {
+		log.WithField("request", msg.String()).Warn("Received pre-prepare request but is primary")
+		return
+	}
+
+	if n.IsInViewChange {
+		log.Warn("Dismissing commit because in view change")
+		return
+	}
+
+	log.WithField("request", msg.String()).Info("Received pre-prepare request")
+
+	n.setViewChangeTimer()
+	if !n.verifyPrePrepareRequest(msg) {
+		log.WithField("request", msg.String()).Warn("Failed to verify pre-prepare request")
+		return
+	}
+
+	n.InProgressRequests++
+
+	sequenceNumber := msg.PrePrepareRequest.SequenceNumber
+	n.Preprepares[sequenceNumber] = msg.PrePrepareRequest
+
+	prepareMessage := &pb.PrepareRequest{
+		ViewId:         msg.PrePrepareRequest.ViewId,
+		SequenceNumber: sequenceNumber,
+		RequestDigest:  msg.PrePrepareRequest.RequestDigest,
+		ReplicaId:      n.Config.Id,
+	}
+
+	// TODO: should I overwrite prepares or append (it should be a rare case anyway)
+	n.Prepares[sequenceNumber] = make(map[string]*pb.PrepareRequest)
+	n.Prepares[sequenceNumber][n.Config.Id] = prepareMessage
+
+	n.Store.AddRequests(msg.PrePrepareRequest.SequenceNumber, msg.Requests)
+	n.Sender.Broadcast("Prepare", prepareMessage)
+}
+
+func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
+	log.WithField("request", msg.String()).Info("Received prepare request")
+
+	if n.IsInViewChange {
+		log.Warn("Dismissing commit because in view change")
+		return
+	}
+
+	if !n.verifyPrepareRequest(msg) {
+		log.WithField("request", msg.String()).Warn("Failed to verify prepare request")
+		return
+	}
+
+	sequenceNumber := msg.SequenceNumber
+
+	if _, ok := n.Prepares[sequenceNumber]; !ok {
+		n.Prepares[sequenceNumber] = make(map[string]*pb.PrepareRequest)
+	}
+
+	n.Prepares[sequenceNumber][msg.ReplicaId] = msg
+
+	// prepared
+	if len(n.Prepares[sequenceNumber]) == 2*n.Config.F()+1 {
+		commitMessage := &pb.CommitRequest{
+			ViewId:         msg.ViewId,
+			SequenceNumber: msg.SequenceNumber,
+			RequestDigest:  msg.RequestDigest,
+			ReplicaId:      n.Config.Id,
+		}
+
+		n.Commits[sequenceNumber] = make(map[string]*pb.CommitRequest)
+		n.Commits[sequenceNumber][n.Config.Id] = commitMessage
+		n.Sender.Broadcast("Commit", commitMessage)
 	}
 }
 
-func (n *Node) updateCommitIndex() {
-	matchIndices := make([]int, len(n.Peers))
-	for i, peer := range n.Peers {
-		matchIndices[i] = n.MatchIndex[peer]
-	}
-	matchIndices = append(matchIndices, len(n.Log)-1) // Include leader's matchIndex
-	sort.Ints(matchIndices)
+func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
+	log.WithField("request", msg.String()).Info("Received commit request")
 
-	// Commit the log entry at the median index
-	majorityIndex := matchIndices[len(matchIndices)/2]
-	if majorityIndex > n.CommitIndex && int(n.Log[majorityIndex].Term) == n.CurrentTerm {
-		// Call the callback for each committed log entry
-		for i := n.CommitIndex + 1; i <= majorityIndex; i++ {
-			log.Printf("[Node %d] Applying command: %v (UUID: %s)", n.Id, n.Log[i].Command, n.Log[i].Uuid)
-			n.CommandCh <- n.Log[i].Command
-			if n.Callbacks[n.Log[i].Uuid] != nil {
-				n.Callbacks[n.Log[i].Uuid] <- true
+	if n.IsInViewChange {
+		log.Warn("Dismissing commit because in view change")
+		return
+	}
+
+	if !n.verifyCommitRequest(msg) {
+		log.WithField("request", msg.String()).Warn("Failed to verify commit request")
+		return
+	}
+
+	sequenceNumber := msg.SequenceNumber
+	if _, ok := n.Commits[sequenceNumber]; !ok {
+		n.Commits[sequenceNumber] = make(map[string]*pb.CommitRequest)
+	}
+
+	n.Commits[sequenceNumber][msg.ReplicaId] = msg
+
+	// committed
+	if len(n.Commits[sequenceNumber]) == 2*n.Config.F()+1 {
+		reqs, resps, checkpoint := n.Store.Commit(msg)
+
+		n.InProgressRequests--
+		if n.InProgressRequests == 0 {
+			n.ViewChangeTimer.Stop()
+		}
+
+		if checkpoint != nil {
+			n.Sender.Broadcast("Checkpoint", checkpoint)
+		}
+
+		for i, req := range reqs {
+			reply := &pb.ClientResponse{
+				ViewId:      msg.ViewId,
+				TimestampMs: req.TimestampMs,
+				ClientId:    req.ClientId,
+				ReplicaId:   n.Config.Id,
+				Result:      resps[i],
+			}
+			n.Sender.SendRPCToClient(req.Callback, "Response", reply)
+		}
+
+		if n.InProgressRequests < n.Config.General.MaxOutstandingRequests && len(n.PendingRequests) > 0 {
+			n.handleClientRequest(n.PendingRequests)
+			n.PendingRequests = []*pb.ClientRequest{}
+		}
+	}
+}
+
+func (n *Node) handleCheckpointRequest(msg *pb.CheckpointRequest) {
+	log.WithField("request", msg.String()).Info("Received checkpoint request")
+
+	stableSequenceNumber := n.Store.AddCheckpointRequest(msg)
+	if stableSequenceNumber == nil {
+		return
+	}
+
+	for seqNo := range n.Preprepares {
+		if seqNo <= *stableSequenceNumber {
+			delete(n.Preprepares, seqNo)
+		}
+	}
+
+	for seqNo := range n.Prepares {
+		if seqNo <= *stableSequenceNumber {
+			delete(n.Prepares, seqNo)
+		}
+	}
+
+	for seqNo := range n.Commits {
+		if seqNo <= *stableSequenceNumber {
+			delete(n.Commits, seqNo)
+		}
+	}
+}
+
+func (n *Node) goToViewChange() {
+	n.IsInViewChange = true
+	n.CurrentView++
+	prepreparedProof := []*pb.ViewChangePreparedMessage{}
+
+	for seqNo := range n.Commits {
+		preprepare := n.Preprepares[seqNo]
+		prepareMessages := []*pb.PrepareRequest{}
+		if len(n.Prepares[seqNo]) > n.Config.F()*2+1 {
+			break
+		}
+		for _, prepare := range n.Prepares[seqNo] {
+			prepareMessages = append(prepareMessages, prepare)
+		}
+
+		preparedProof := &pb.ViewChangePreparedMessage{
+			PrePrepareRequest: preprepare,
+			PreparedMessages:  prepareMessages,
+		}
+		prepreparedProof = append(prepreparedProof, preparedProof)
+	}
+
+	viewChangeRequest := &pb.ViewChangeRequest{
+		NewViewId:                n.CurrentView,
+		LastStableSequenceNumber: n.Store.GetLastStableSequenceNumber(),
+		CheckpointProof:          n.Store.GetLastStableCheckpoint(),
+		PreparedProof:            prepreparedProof,
+		ReplicaId:                n.Config.Id,
+	}
+
+	n.Sender.SendRPCToPeer(
+		n.LeaderElection.GetLeader(n.CurrentView),
+		"ViewChange",
+		viewChangeRequest,
+	)
+}
+
+func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
+	log.WithField("request", msg.String()).Info("Received view change request")
+
+	if msg.NewViewId < n.CurrentView {
+		log.WithField("request", msg.String()).WithField("current-view", n.CurrentView).Warn("Received view change request with old view")
+		return
+	}
+
+	if n.LeaderElection.GetLeader(msg.NewViewId) != n.Config.Id {
+		log.WithField("request", msg.String()).Warn("Received view change request but not leader for view")
+		return
+	}
+
+	if _, ok := n.ViewChanges[msg.NewViewId]; !ok {
+		n.ViewChanges[msg.NewViewId] = make(map[string]*pb.ViewChangeRequest)
+	}
+	n.ViewChanges[msg.NewViewId][msg.ReplicaId] = msg
+
+	if len(n.ViewChanges[msg.NewViewId]) == 2*n.Config.F() {
+		minSeq := n.Store.GetLastStableSequenceNumber()
+		maxSeq := int64(0)
+		for _, viewChange := range n.ViewChanges[msg.NewViewId] {
+			if viewChange.LastStableSequenceNumber < minSeq {
+				minSeq = viewChange.LastStableSequenceNumber
+			}
+			if viewChange.LastStableSequenceNumber > maxSeq {
+				maxSeq = viewChange.LastStableSequenceNumber
 			}
 		}
-		n.CommitIndex = majorityIndex
-		// log.Printf("[Node %d] Updated commitIndex to %d", n.Id, n.CommitIndex)
-	}
-}
 
-func (n *Node) getLogTerm(index int) int {
-	if index < 0 || index >= len(n.Log) {
-		return 0 // Default term
-	}
-	return int(n.Log[index].Term)
-}
-
-func (n *Node) listenForRequests() {
-	for {
-		select {
-		case command := <-n.RequestCh:
-			// log.Printf("[Node %d] Received command: %v", n.Id, command)
-			err := n.applyCommandRequest(command, "")
-			if err != nil {
-				log.Printf("[Node %d] Failed to apply command: %v", n.Id, err)
-			}
-		case request := <-n.PleaseCh:
-			// log.Printf("[Node %d] Received request: %v", n.Id, request)
-			err := n.applyCommandRequest(Request{Command: request.Command}, request.Uuid)
-			if err != nil {
-				log.Printf("[Node %d] Failed to apply command: %v", n.Id, err)
-			}
-		}
-	}
-}
-
-func (n *Node) applyCommandRequest(command Request, rUuid string) error {
-	if rUuid == "" {
-		rUuid = uuid.New().String()
-	}
-	n.Callbacks[rUuid] = command.Callback
-
-	log.Printf("[Node %d] Applying command request: %v (UUID: %s)", n.Id, command.Command, rUuid)
-
-	if n.Role != Leader {
-		if n.LeaderId != nil {
-			res, err := SendRPCToPeer(*n.LeaderId, "PleaseDoThis", &pb.RequestPleaseRequest{Command: command.Command, Uuid: rUuid})
-			if err != nil {
-				return fmt.Errorf("failed to send command to leader: %v", err)
-			}
-			if res.(*pb.RequestPleaseResponse).Success {
-				return nil
+		preprepares := make([]*pb.PrePrepareRequest, maxSeq-minSeq)
+		for seqNo := minSeq + 1; seqNo < maxSeq; seqNo++ {
+			if preprepare, ok := n.Preprepares[int64(seqNo)]; ok {
+				preprepares[seqNo-minSeq] = preprepare
 			} else {
-				return fmt.Errorf("leader failed to apply command")
+				preprepares[seqNo-minSeq] = &pb.PrePrepareRequest{
+					ViewId:         msg.NewViewId - 1,
+					SequenceNumber: seqNo,
+					RequestDigest:  "nil",
+				}
 			}
 		}
-		return fmt.Errorf("Node %d doesn't know the leader", n.Id)
+
+		viewChangeMessages := make([]*pb.ViewChangeRequest, 0, 2*n.Config.F())
+		for _, viewChange := range n.ViewChanges[msg.NewViewId] {
+			viewChangeMessages = append(viewChangeMessages, viewChange)
+		}
+
+		newViewMessage := &pb.NewViewRequest{
+			NewViewId:       msg.NewViewId,
+			ViewChangeProof: viewChangeMessages,
+			Preprepares:     preprepares,
+			ReplicaId:       n.Config.Id,
+		}
+
+		n.Sender.Broadcast("NewView", newViewMessage)
 	}
-
-	n.Mu.Lock()
-	defer n.Mu.Unlock()
-
-	// Append the command to the local log
-	entry := pb.LogEntry{
-		Term:    int32(n.CurrentTerm),
-		Command: command.Command,
-		Uuid:    rUuid,
-	}
-	n.Log = append(n.Log, &entry)
-
-	// Update matchIndex and nextIndex for log replication
-	for _, peer := range n.Peers {
-		go n.sendAppendEntries(peer)
-	}
-
-	return nil
 }
 
-func (n *Node) AppendEntriesHandler(req *pb.AppendEntriesRequest) (*pb.AppendEntriesResponse, error) {
-	response := &pb.AppendEntriesResponse{
-		Term:    int32(n.CurrentTerm),
-		Success: false,
+func (n *Node) handleNewViewRequest(msg *pb.NewViewRequest) {
+	log.WithField("request", msg.String()).Info("Received new view request")
+
+	if msg.NewViewId < n.CurrentView {
+		log.WithField("request", msg.String()).WithField("current-view", n.CurrentView).Warn("Received new view request with old view")
+		return
 	}
 
-	// Update term if necessary
-	if int(req.Term) > n.CurrentTerm {
-		n.LeaderId = new(int)
-		*n.LeaderId = int(req.LeaderID)
-		n.becomeFollower(int(req.Term))
+	if n.LeaderElection.GetLeader(msg.NewViewId) != n.Config.Id {
+		log.WithField("request", msg.String()).Warn("Received new view request but not leader for view")
+		return
 	}
 
-	// Reject if term is smaller
-	if int(req.Term) < n.CurrentTerm {
-		// log.Printf("[Node %d] Rejecting AppendEntries from %d: term is smaller", n.Id, int(req.LeaderID))
-		return response, nil
+	if !n.verifyNewViewRequest(msg) {
+		log.WithField("request", msg.String()).Warn("Failed to verify new view request")
+		return
 	}
 
-	n.LeaderId = new(int)
-	*n.LeaderId = int(req.LeaderID)
-
-	// Reset election timer (heartbeat)
-	n.resetElectionTimeout()
-
-	// Check log consistency
-	if int(req.PrevLogIndex) >= len(n.Log) ||
-		(int(req.PrevLogIndex) >= 0 && n.Log[req.PrevLogIndex].Term != req.PrevLogTerm) {
-		// log.Printf("[Node %d] Rejecting AppendEntries from %d: log inconsistency", n.Id, int(req.LeaderID))
-		return response, nil
-	}
-
-	// Append new entries
-	for i, entry := range req.Entries {
-		index := int(req.PrevLogIndex) + 1 + i
-		if index < len(n.Log) {
-			if n.Log[index].Term != entry.Term {
-				// Conflict: remove entries starting from index
-				n.Log = n.Log[:index]
-			}
-		}
-		if index >= len(n.Log) {
-			n.Log = append(n.Log, entry)
-		}
-	}
-
-	// Update commit index
-	// log.Printf("[Node %d] Leader commitIndex: %d, Node commitIndex: %d", n.Id, int(req.LeaderCommit), n.CommitIndex)
-	if int(req.LeaderCommit) > n.CommitIndex {
-		prevCommitIndex := n.CommitIndex
-		n.CommitIndex = min(int(req.LeaderCommit), len(n.Log)-1)
-		for i := prevCommitIndex + 1; i <= n.CommitIndex; i++ {
-			log.Printf("[Node %d] Committing command: %v (UUID: %s)", n.Id, n.Log[i].Command, n.Log[i].Uuid)
-			n.CommandCh <- n.Log[i].Command
-			if n.Callbacks[n.Log[i].Uuid] != nil {
-				n.Callbacks[n.Log[i].Uuid] <- true
-			}
-		}
-	}
-
-	response.Success = true
-	// log.Printf("[Node %d] Appended entries from %d: log=%v", n.Id, int(req.LeaderID), n.Log)
-	return response, nil
-}
-
-func (n *Node) RequestVoteHandler(req *pb.RequestVoteRequest) (*pb.RequestVoteResponse, error) {
-	response := &pb.RequestVoteResponse{
-		Term:        int32(n.CurrentTerm),
-		VoteGranted: false,
-	}
-
-	// Update term if necessary
-	if int(req.Term) > n.CurrentTerm {
-		n.LeaderId = nil
-		n.becomeFollower(int(req.Term))
-	}
-
-	// Reject vote if term is stale
-	if int(req.Term) < n.CurrentTerm {
-		// log.Printf("[Node %d] Rejecting vote for %d: term is stale", n.Id, int(req.CandidateID))
-		return response, nil
-	}
-
-	// Check if node already voted for another candidate
-	if n.VotedFor != nil && *n.VotedFor != int(req.CandidateID) {
-		return response, nil
-	}
-
-	lastLogIndex := len(n.Log) - 1
-	lastLogTerm := n.getLastLogTerm()
-
-	if int(req.LastLogTerm) < lastLogTerm ||
-		(int(req.LastLogTerm) == lastLogTerm && int(req.LastLogIndex) < lastLogIndex) {
-		// log.Printf("[Node %d] Rejecting vote for %d: log is stale", n.Id, int(req.CandidateID))
-		return response, nil
-	}
-
-	// Grant vote
-	n.VotedFor = new(int)
-	*n.VotedFor = int(req.CandidateID)
-	n.LeaderId = n.VotedFor
-	n.resetElectionTimeout()
-
-	response.VoteGranted = true
-	// log.Printf("[Node %d] Voted for %d", n.Id, int(req.CandidateID))
-	return response, nil
-}
-
-func (n *Node) resetElectionTimeout() {
+	n.CurrentView = msg.NewViewId
+	n.LeaderId = msg.ReplicaId
+	n.IsInViewChange = false
+	n.ViewChangeTimer.Stop()
 	select {
-	case n.HeartbeatCh <- true:
-		// log.Printf("[Node %d] Reset election timeout", n.Id)
+	// drain the channel if there is a message
+	case <-n.ViewChangeTimer.C:
 	default:
-		// log.Printf("[Node %d] Election timeout channel is full", n.Id)
 	}
+	n.ViewChanges = make(map[int64]map[string]*pb.ViewChangeRequest)
+	n.Preprepares = make(map[int64]*pb.PrePrepareRequest)
+	n.Prepares = make(map[int64]map[string]*pb.PrepareRequest)
+	n.Commits = make(map[int64]map[string]*pb.CommitRequest)
+
+	for _, preprepare := range msg.Preprepares {
+		n.Preprepares[preprepare.SequenceNumber] = preprepare
+		n.Prepares[preprepare.SequenceNumber] = make(map[string]*pb.PrepareRequest)
+		prepareMessage := &pb.PrepareRequest{
+			ViewId:         preprepare.ViewId,
+			SequenceNumber: preprepare.SequenceNumber,
+			RequestDigest:  preprepare.RequestDigest,
+			ReplicaId:      n.Config.Id,
+		}
+		n.Prepares[preprepare.SequenceNumber][n.Config.Id] = prepareMessage
+		n.Sender.Broadcast("Prepare", prepareMessage)
+	}
+}
+
+func (n *Node) verifyPrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) bool {
+	// TODO: check signature
+	if msg.PrePrepareRequest.ViewId != n.CurrentView {
+		log.WithField("preprepare", msg.String()).WithField("my-view", n.CurrentView).Warn("preprepare view mismatch")
+		return false
+	}
+
+	sequenceNumber := msg.PrePrepareRequest.SequenceNumber
+	pastPreprepare := n.Preprepares[sequenceNumber]
+	if pastPreprepare != nil && pastPreprepare.RequestDigest != msg.PrePrepareRequest.RequestDigest {
+		log.WithField("preprepare", msg.String()).WithField("my-digest", pastPreprepare.RequestDigest).Warn("preprepare digest mismatch")
+		return false
+	}
+
+	if !n.sequenceInWaterMark(sequenceNumber) {
+		return false
+	}
+
+	return true
+}
+
+func (n *Node) verifyPrepareRequest(msg *pb.PrepareRequest) bool {
+	// TODO: check signature
+	if msg.ViewId != n.CurrentView {
+		log.WithField("prepare", msg.String()).WithField("my-view", n.CurrentView).Warn("prepare view mismatch")
+		return false
+	}
+
+	sequenceNumber := msg.SequenceNumber
+	pastPreprepare := n.Preprepares[sequenceNumber]
+	if pastPreprepare == nil {
+		log.WithField("prepare", msg.String()).Warn("prepare without preprepare")
+		return false
+	}
+
+	if pastPreprepare.RequestDigest != msg.RequestDigest {
+		log.WithField("prepare", msg.String()).WithField("my-digest", pastPreprepare.RequestDigest).Warn("prepare digest mismatch")
+		return false
+	}
+
+	if !n.sequenceInWaterMark(sequenceNumber) {
+		return false
+	}
+
+	return true
+}
+
+func (n *Node) verifyCommitRequest(msg *pb.CommitRequest) bool {
+	// TODO: check signature
+	if msg.ViewId != n.CurrentView {
+		log.WithField("commit", msg.String()).WithField("my-view", n.CurrentView).Warn("commit view mismatch")
+		return false
+	}
+
+	sequenceNumber := msg.SequenceNumber
+	pastPreprepare := n.Preprepares[sequenceNumber]
+	if pastPreprepare.RequestDigest != msg.RequestDigest {
+		log.WithField("commit", msg.String()).WithField("my-digest", pastPreprepare.RequestDigest).Warn("commit digest mismatch")
+		return false
+	}
+
+	if !n.sequenceInWaterMark(sequenceNumber) {
+		return false
+	}
+
+	return true
+}
+
+func (n *Node) verifyNewViewRequest(_ *pb.NewViewRequest) bool {
+	// TODO: A backup accepts a new-view message for view v + 1
+	// if it is signed properly, if the view-change messages it
+	// contains are valid for view v + 1, and if the set O is
+	// correct; it verifies the correctness of O by performing a
+	// computation similar to the one used by the primary to
+	// create O. Then it adds the new information to its log as
+	// described for the primary, multicasts a prepare for each
+	// message in to all the other replicas, adds these prepares
+	// to its log, and enters view v + 1.
+	return true
+}
+
+func (n *Node) sequenceInWaterMark(sequenceNumber int64) bool {
+	lowWaterMark := n.Store.GetLastStableSequenceNumber() + 1
+	highWaterMark := lowWaterMark + int64(n.Config.General.WaterMarkInterval)
+	if sequenceNumber < lowWaterMark || sequenceNumber >= highWaterMark {
+		log.WithField("sequence-number", sequenceNumber).
+			WithField("low-water-mark", lowWaterMark).
+			WithField("high-water-mark", highWaterMark).
+			Warn("watermark mismatch")
+		return false
+	}
+
+	return true
 }

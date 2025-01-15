@@ -36,10 +36,7 @@
       function onSubClick() {
         $.post("/sub", { value: $("#subValue").val() }).done(refreshState);
       }
-      function onMulClick() {
-        $.post("/mul", { value: $("#mulValue").val() }).done(refreshState);
-      }
-      setInterval(refreshState, 1000);
+      setInterval(refreshState, 10000);
       refreshState();
     </script>
   </head>
@@ -113,35 +110,6 @@
                 >
                   <i class="fa-solid fa-minus"></i>
                   Subtract
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-        <div class="col">
-          <div class="card">
-            <div class="card-header">Multiplication</div>
-            <div class="card-body">
-              <form>
-                <div class="input-group mb-3">
-                  <span class="input-group-text" id="inputGroup-sizing-default"
-                    >mul</span
-                  >
-                  <input
-                    id="mulValue"
-                    type="text"
-                    class="form-control"
-                    aria-label="Sizing example input"
-                    aria-describedby="inputGroup-sizing-default"
-                  />
-                </div>
-                <div
-                  type="submit"
-                  class="btn btn-primary"
-                  onclick="onMulClick();"
-                >
-                  <i class="fa-solid fa-xmark"></i>
-                  Multiply
                 </div>
               </form>
             </div>
