@@ -22,6 +22,11 @@ func NewHttpServer(config *Config, client *Client) *HttpServer {
 }
 
 func (h *HttpServer) Serve() {
+	if h.config.HttpAddress == nil {
+		log.Info("not starting http server as address is nil")
+		return
+	}
+
 	h.MakeHandlers()
 
 	hostAddress := fmt.Sprintf("%s:%d", h.config.HttpAddress.Host, h.config.HttpAddress.Port)

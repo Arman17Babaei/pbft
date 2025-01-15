@@ -161,8 +161,8 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 
 func (c *Client) Response(ctx context.Context, response *pb.ClientResponse) (*pb.EmptyResponse, error) {
 	log.Debug("client.response")
-	//c.mu.Lock()
-	//defer c.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	log.WithField("reponse", response.String()).Info("operation result received")
 	if _, ok := c.collectedResponse[response.TimestampMs]; !ok {

@@ -521,6 +521,11 @@ func (n *Node) verifyCommitRequest(msg *pb.CommitRequest) bool {
 
 	sequenceNumber := msg.SequenceNumber
 	pastPreprepare := n.Preprepares[sequenceNumber]
+	if pastPreprepare == nil {
+		log.WithField("commit", msg.String()).Warn("commit without preprepare")
+		return false
+	}
+
 	if pastPreprepare.RequestDigest != msg.RequestDigest {
 		log.WithField("commit", msg.String()).WithField("my-digest", pastPreprepare.RequestDigest).Warn("commit digest mismatch")
 		return false

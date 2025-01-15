@@ -83,6 +83,11 @@ func (s *Sender) sendRPCToClient(clientAddress, method string, message proto.Mes
 }
 
 func (s *Sender) sendRPCToPeer(peerAddress *Address, method string, message proto.Message) {
+	if peerAddress == nil {
+		log.Error("peer address is nil")
+		return
+	}
+
 	c, err := grpc.NewClient(
 		fmt.Sprintf("%s:%d", peerAddress.Host, peerAddress.Port),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),

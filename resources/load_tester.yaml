@@ -1,0 +1,3 @@
+duration_seconds: 60
+throughput_per_second: 2000
+num_clients: 50
