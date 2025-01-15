@@ -17,8 +17,6 @@ type Client struct {
 	mu     sync.Mutex
 	config *Config
 
-	nodeClients map[string]pb.PbftClient
-
 	listener          net.Listener
 	grpcServer        *grpc.Server
 	callbackAddress   string
@@ -91,21 +89,7 @@ func NewClient(config *Config) *Client {
 		callbackChannels:  make(map[int64]chan<- *pb.OperationResult),
 	}
 
-	// setup clients
-	client.nodeClients = make(map[string]pb.PbftClient)
-	for id, node := range config.NodesAddress {
-		target := fmt.Sprintf("%s:%d", node.Host, node.Port)
-		conn, err := grpc.NewClient(
-			target,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		)
-		if err != nil {
-			log.WithError(err).WithField("target", target).Error("error creating pbft client")
-		}
-		client.nodeClients[id] = pb.NewPbftClient(conn)
-	}
-
-	// setup servers
+	// setup server
 	client.callbackAddress = fmt.Sprintf("%s:%d", config.GrpcAddress.Host, config.GrpcAddress.Port)
 
 	var err error
@@ -136,8 +120,8 @@ func (c *Client) Serve() {
 
 func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResult) error {
 	log.Debug("client.sendRequest")
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	//c.mu.Lock()
+	//defer c.mu.Unlock()
 
 	leader := c.config.NodesAddress[c.currentLeader]
 	target := fmt.Sprintf("%s:%d", leader.Host, leader.Port)
@@ -171,13 +155,14 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 		return err
 	}
 
+	log.Info("request sent to leader")
 	return nil
 }
 
 func (c *Client) Response(ctx context.Context, response *pb.ClientResponse) (*pb.EmptyResponse, error) {
 	log.Debug("client.response")
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	//c.mu.Lock()
+	//defer c.mu.Unlock()
 
 	log.WithField("reponse", response.String()).Info("operation result received")
 	if _, ok := c.collectedResponse[response.TimestampMs]; !ok {
@@ -185,7 +170,7 @@ func (c *Client) Response(ctx context.Context, response *pb.ClientResponse) (*pb
 	}
 	c.collectedResponse[response.TimestampMs].AddResponse(response)
 
-	if c.collectedResponse[response.TimestampMs].GetSize(response.Result.Value) == c.config.F() + 1 {
+	if c.collectedResponse[response.TimestampMs].GetSize(response.Result.Value) == c.config.F()+1 {
 		log.WithField("timestamp", response.TimestampMs).Info("request response ready")
 		c.callbackChannels[response.TimestampMs] <- c.collectedResponse[response.TimestampMs].GetResponse().Result
 	}

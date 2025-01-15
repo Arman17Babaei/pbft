@@ -6,8 +6,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-
 func main() {
+	log.SetLevel(log.TraceLevel)
 	var clientConfig client.Config
 	err := config.LoadConfig(&clientConfig, "client")
 	if err != nil {

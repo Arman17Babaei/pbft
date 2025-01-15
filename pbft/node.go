@@ -58,9 +58,9 @@ func NewNode(config *Config, sender *Sender, inputCh <-chan proto.Message) *Node
 
 		LeaderElection: leaderElection,
 
-		RunningTimer:    false,
-		IsInViewChange:  false,
-		ViewChanges:     make(map[int64]map[string]*pb.ViewChangeRequest),
+		RunningTimer:   false,
+		IsInViewChange: false,
+		ViewChanges:    make(map[int64]map[string]*pb.ViewChangeRequest),
 
 		Preprepares: make(map[int64]*pb.PrePrepareRequest),
 		Prepares:    make(map[int64]map[string]*pb.PrepareRequest),
@@ -136,7 +136,10 @@ func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
 	}
 
 	if n.IsInViewChange {
-		log.Warn("Dismissing commit because in view change")
+		log.Warn("Dismissing request because in view change")
+		if !n.RunningTimer {
+			n.setViewChangeTimer()
+		}
 		return
 	}
 
@@ -170,7 +173,10 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 	}
 
 	if n.IsInViewChange {
-		log.Warn("Dismissing commit because in view change")
+		log.Warn("Dismissing preprepare because in view change")
+		if !n.RunningTimer {
+			n.setViewChangeTimer()
+		}
 		return
 	}
 
@@ -206,7 +212,10 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 	log.WithField("request", msg.String()).Info("Received prepare request")
 
 	if n.IsInViewChange {
-		log.Warn("Dismissing commit because in view change")
+		log.Warn("Dismissing prepare because in view change")
+		if !n.RunningTimer {
+			n.setViewChangeTimer()
+		}
 		return
 	}
 
@@ -243,6 +252,9 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 
 	if n.IsInViewChange {
 		log.Warn("Dismissing commit because in view change")
+		if !n.RunningTimer {
+			n.setViewChangeTimer()
+		}
 		return
 	}
 
@@ -371,7 +383,7 @@ func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
 	}
 	n.ViewChanges[msg.NewViewId][msg.ReplicaId] = msg
 
-	if len(n.ViewChanges[msg.NewViewId]) == 2*n.Config.F() {
+	if len(n.ViewChanges[msg.NewViewId]) == 2*n.Config.F()+1 {
 		minSeq := n.Store.GetLastStableSequenceNumber()
 		maxSeq := int64(0)
 		for _, viewChange := range n.ViewChanges[msg.NewViewId] {
@@ -417,11 +429,6 @@ func (n *Node) handleNewViewRequest(msg *pb.NewViewRequest) {
 
 	if msg.NewViewId < n.CurrentView {
 		log.WithField("request", msg.String()).WithField("current-view", n.CurrentView).Warn("Received new view request with old view")
-		return
-	}
-
-	if n.LeaderElection.GetLeader(msg.NewViewId) != n.Config.Id {
-		log.WithField("request", msg.String()).Warn("Received new view request but not leader for view")
 		return
 	}
 
@@ -526,7 +533,11 @@ func (n *Node) verifyCommitRequest(msg *pb.CommitRequest) bool {
 	return true
 }
 
-func (n *Node) verifyNewViewRequest(_ *pb.NewViewRequest) bool {
+func (n *Node) verifyNewViewRequest(msg *pb.NewViewRequest) bool {
+	if msg.NewViewId < n.CurrentView {
+		return false
+	}
+
 	// TODO: A backup accepts a new-view message for view v + 1
 	// if it is signed properly, if the view-change messages it
 	// contains are valid for view v + 1, and if the set O is

@@ -86,3 +86,10 @@ func (s *Service) ViewChange(ctx context.Context, req *pb.ViewChangeRequest) (*p
 
 	return &pb.Empty{}, nil
 }
+
+func (s *Service) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.Empty, error) {
+	log.WithField("request", req).Info("new-view request received")
+	s.inputCh <- req
+
+	return &pb.Empty{}, nil
+}

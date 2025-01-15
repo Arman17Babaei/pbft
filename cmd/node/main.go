@@ -13,6 +13,7 @@ type CLI struct {
 }
 
 func main() {
+	log.SetLevel(log.TraceLevel)
 	var cli CLI
 	kong.Parse(&cli)
 

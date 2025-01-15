@@ -40,9 +40,7 @@ func NewSender(config *Config) *Sender {
 }
 
 func (s *Sender) Broadcast(method string, message proto.Message) {
-	log.WithField("method", method).
-		WithField("message", message.ProtoReflect().Descriptor().Syntax().String()).
-		Debug("broadcast message")
+	log.WithField("method", method).Debug("broadcast message")
 	for id := range s.peers {
 		s.SendRPCToPeer(id, method, message)
 	}

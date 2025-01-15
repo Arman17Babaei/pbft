@@ -1,11 +1,7 @@
 package pbft
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"slices"
-	"sort"
 	"strconv"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
@@ -80,8 +76,9 @@ func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
 
 	s.unstableCheckpoints[id].proof = append(s.unstableCheckpoints[id].proof, checkpoint)
 	if len(s.unstableCheckpoints[id].proof) > 2*s.config.F() {
+		sequenceNumber := &s.unstableCheckpoints[id].proof[0].SequenceNumber
 		s.stabilizeCheckpoint(s.unstableCheckpoints[id])
-		return &s.unstableCheckpoints[id].proof[0].SequenceNumber
+		return sequenceNumber
 	}
 
 	return nil
@@ -117,22 +114,7 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 }
 
 func (s *State) Digest() string {
-	// Sort the keys to ensure consistent ordering
-	keys := make([]string, 0, len(s.value))
-	for k := range s.value {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	// Concatenate the key-value pairs into a single string
-	var data string
-	for _, key := range keys {
-		data += fmt.Sprintf("%s:%d;", key, s.value[key])
-	}
-
-	// Compute the SHA-256 hash of the concatenated string
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
+	return strconv.Itoa(s.value[""])
 }
 
 func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {

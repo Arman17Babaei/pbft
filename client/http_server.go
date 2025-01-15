@@ -3,9 +3,10 @@ package client
 import (
 	"fmt"
 	"net/http"
+	"time"
 
-	log "github.com/sirupsen/logrus"
 	pb "github.com/Arman17Babaei/pbft/proto"
+	log "github.com/sirupsen/logrus"
 )
 
 type HttpServer struct {
@@ -39,8 +40,14 @@ func (h *HttpServer) MakeHandlers() {
 		op := &pb.Operation{Type: pb.Operation_GET}
 		resultCh := make(chan *pb.OperationResult)
 		h.client.SendRequest(op, resultCh)
-		result := <-resultCh
-		fmt.Fprint(w, result.Value)
+		timer := time.NewTimer(time.Duration(h.config.HttpTimeoutMs) * time.Millisecond)
+		select {
+		case result := <-resultCh:
+			fmt.Fprint(w, result.Value)
+		case <-timer.C:
+			log.Error("timeout waiting for response")
+			http.Error(w, "timeout", http.StatusRequestTimeout)
+		}
 	})
 
 	http.HandleFunc("/add", func(w http.ResponseWriter, r *http.Request) {
@@ -58,8 +65,14 @@ func (h *HttpServer) MakeHandlers() {
 		op := &pb.Operation{Type: pb.Operation_ADD, Value: r.FormValue("value")}
 		resultCh := make(chan *pb.OperationResult)
 		h.client.SendRequest(op, resultCh)
-		result := <-resultCh
-		fmt.Fprint(w, result.Value)
+		timer := time.NewTimer(time.Duration(h.config.HttpTimeoutMs) * time.Millisecond)
+		select {
+		case result := <-resultCh:
+			fmt.Fprint(w, result.Value)
+		case <-timer.C:
+			log.Error("timeout waiting for response")
+			http.Error(w, "timeout", http.StatusRequestTimeout)
+		}
 	})
 
 	http.HandleFunc("/sub", func(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +90,13 @@ func (h *HttpServer) MakeHandlers() {
 		op := &pb.Operation{Type: pb.Operation_SUB, Value: r.FormValue("value")}
 		resultCh := make(chan *pb.OperationResult)
 		h.client.SendRequest(op, resultCh)
-		result := <-resultCh
-		fmt.Fprint(w, result.Value)
+		timer := time.NewTimer(time.Duration(h.config.HttpTimeoutMs) * time.Millisecond)
+		select {
+		case result := <-resultCh:
+			fmt.Fprint(w, result.Value)
+		case <-timer.C:
+			log.Error("timeout waiting for response")
+			http.Error(w, "timeout", http.StatusRequestTimeout)
+		}
 	})
 }

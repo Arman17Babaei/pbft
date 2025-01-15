@@ -6,6 +6,7 @@ type Config struct {
 	HttpAddress   *Address            `mapstructure:"http_address"`
 	NodesAddress  map[string]*Address `mapstructure:"nodes_address"`
 	GrpcTimeoutMs int                 `mapstructure:"grpc_timeout_ms"`
+	HttpTimeoutMs int                 `mapstructure:"http_timeout_ms"`
 }
 
 type Address struct {
