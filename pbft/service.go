@@ -16,14 +16,15 @@ import (
 type Service struct {
 	config     *Config
 	inputCh    chan<- proto.Message
+	requestCh  chan<- *pb.ClientRequest
 	listener   net.Listener
 	grpcServer *grpc.Server
 
 	pb.UnimplementedPbftServer
 }
 
-func NewService(requestCh chan<- proto.Message, config *Config) *Service {
-	service := &Service{config: config, inputCh: requestCh}
+func NewService(inputCh chan<- proto.Message, requestCh chan<- *pb.ClientRequest, config *Config) *Service {
+	service := &Service{config: config, inputCh: inputCh, requestCh: requestCh}
 
 	var err error
 	service.listener, err = net.Listen("tcp", fmt.Sprintf("%s:%d", config.Address.Host, config.Address.Port))
@@ -45,49 +46,52 @@ func (s *Service) Serve() {
 	}
 }
 
-func (s *Service) Request(ctx context.Context, req *pb.ClientRequest) (*pb.Empty, error) {
+func (s *Service) Request(_ context.Context, req *pb.ClientRequest) (*pb.Empty, error) {
 	log.WithField("request", req).Info("client request received")
-	s.inputCh <- req
+	select {
+	case s.requestCh <- req:
+	default:
+	}
 
 	return &pb.Empty{}, nil
 }
 
-func (s *Service) PrePrepare(ctx context.Context, req *pb.PiggyBackedPrePareRequest) (*pb.Empty, error) {
+func (s *Service) PrePrepare(_ context.Context, req *pb.PiggyBackedPrePareRequest) (*pb.Empty, error) {
 	log.WithField("request", req).Info("pre-prepare request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
 }
 
-func (s *Service) Prepare(ctx context.Context, req *pb.PrepareRequest) (*pb.Empty, error) {
+func (s *Service) Prepare(_ context.Context, req *pb.PrepareRequest) (*pb.Empty, error) {
 	log.WithField("request", req).Info("prepare request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
 }
 
-func (s *Service) Commit(ctx context.Context, req *pb.CommitRequest) (*pb.Empty, error) {
+func (s *Service) Commit(_ context.Context, req *pb.CommitRequest) (*pb.Empty, error) {
 	log.WithField("request", req).Info("commit request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
 }
 
-func (s *Service) Checkpoint(ctx context.Context, req *pb.CheckpointRequest) (*pb.Empty, error) {
+func (s *Service) Checkpoint(_ context.Context, req *pb.CheckpointRequest) (*pb.Empty, error) {
 	log.WithField("request", req).Info("checkpoint request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
 }
 
-func (s *Service) ViewChange(ctx context.Context, req *pb.ViewChangeRequest) (*pb.Empty, error) {
+func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.Empty, error) {
 	log.WithField("request", req).Info("view-change request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
 }
 
-func (s *Service) NewView(ctx context.Context, req *pb.NewViewRequest) (*pb.Empty, error) {
+func (s *Service) NewView(_ context.Context, req *pb.NewViewRequest) (*pb.Empty, error) {
 	log.WithField("request", req).Info("new-view request received")
 	s.inputCh <- req
 

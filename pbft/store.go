@@ -103,6 +103,7 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 
 	var checkpoint *pb.CheckpointRequest
 	if int(commit.SequenceNumber)%s.config.General.CheckpointInterval == 0 {
+		log.WithField("seq-no", commit.SequenceNumber).Error("created checkpoint for seq-no")
 		checkpoint = &pb.CheckpointRequest{
 			SequenceNumber: commit.SequenceNumber,
 			StateDigest:    []byte(s.state.Digest()),
@@ -125,6 +126,13 @@ func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
 	for id, cp := range s.unstableCheckpoints {
 		if cp.proof[0].SequenceNumber <= checkpoint.proof[0].SequenceNumber {
 			delete(s.unstableCheckpoints, id)
+		}
+	}
+
+	// remove stale requests
+	for seqNo := range s.requests {
+		if seqNo <= checkpoint.proof[0].SequenceNumber {
+			delete(s.requests, seqNo)
 		}
 	}
 }

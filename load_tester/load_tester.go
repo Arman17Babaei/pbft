@@ -59,7 +59,7 @@ func (l *LoadTest) Run() {
 	resultChannels := make([]chan int, 0, len(l.clients))
 	time.Sleep(time.Second)
 	for _, c := range l.clients {
-		stopCh := make(chan struct{})
+		stopCh := make(chan struct{}, 1)
 		stopChannels = append(stopChannels, stopCh)
 		resultCh := make(chan int)
 		resultChannels = append(resultChannels, resultCh)
@@ -71,7 +71,7 @@ func (l *LoadTest) Run() {
 				select {
 				case <-ticker.C:
 					op := &pb.Operation{Type: pb.Operation_GET}
-					c.SendRequest(op, responseCh)
+					_ = c.SendRequest(op, responseCh)
 				case <-responseCh:
 					done += 1
 				case <-stopCh:
@@ -81,7 +81,7 @@ func (l *LoadTest) Run() {
 			}
 		}(stopCh, resultCh)
 	}
-
+	startTime := time.Now()
 	time.Sleep(time.Duration(l.config.DurationSeconds) * time.Second)
 	for _, ch := range stopChannels {
 		ch <- struct{}{}
@@ -93,14 +93,15 @@ func (l *LoadTest) Run() {
 	}
 
 	fmt.Printf("Total done: %d\n", totalDone)
-	fmt.Printf("Throughput: %f\n", float64(totalDone)/float64(l.config.DurationSeconds))
+	fmt.Printf("Throughput: %f\n", float64(totalDone)/time.Since(startTime).Seconds())
 }
 
 func startNode(config *pbft.Config) *pbft.Node {
-	inputCh := make(chan proto.Message)
-	service := pbft.NewService(inputCh, config)
+	inputCh := make(chan proto.Message, 5)
+	requestCh := make(chan *pb.ClientRequest, 5)
+	service := pbft.NewService(inputCh, requestCh, config)
 	sender := pbft.NewSender(config)
-	node := pbft.NewNode(config, sender, inputCh)
+	node := pbft.NewNode(config, sender, inputCh, requestCh)
 
 	go node.Run()
 	go service.Serve()

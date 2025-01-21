@@ -17,12 +17,13 @@ const (
 )
 
 type Node struct {
-	Mu      sync.Mutex
-	Config  *Config
-	Sender  *Sender
-	Role    Role
-	Store   *Store
-	InputCh <-chan proto.Message
+	Mu        sync.Mutex
+	Config    *Config
+	Sender    *Sender
+	Role      Role
+	Store     *Store
+	InputCh   <-chan proto.Message
+	RequestCh <-chan *pb.ClientRequest
 
 	LeaderElection LeaderElection
 
@@ -36,25 +37,28 @@ type Node struct {
 	Commits     map[int64]map[string]*pb.CommitRequest
 
 	PendingRequests    []*pb.ClientRequest
-	InProgressRequests int
+	InProgressRequests map[int64]any
 
 	CurrentView        int64
 	LeaderId           string
 	LastSequenceNumber int64
+
+	Logs []string
 }
 
-func NewNode(config *Config, sender *Sender, inputCh <-chan proto.Message) *Node {
+func NewNode(config *Config, sender *Sender, inputCh <-chan proto.Message, requestCh <-chan *pb.ClientRequest) *Node {
 	leaderElection := NewRoundRobinLeaderElection(config)
 	role := Backup
 	if leaderElection.GetLeader(0) == config.Id {
 		role = Primary
 	}
 	return &Node{
-		Config:  config,
-		Sender:  sender,
-		Role:    role,
-		Store:   NewStore(config),
-		InputCh: inputCh,
+		Config:    config,
+		Sender:    sender,
+		Role:      role,
+		Store:     NewStore(config),
+		InputCh:   inputCh,
+		RequestCh: requestCh,
 
 		LeaderElection: leaderElection,
 
@@ -67,7 +71,7 @@ func NewNode(config *Config, sender *Sender, inputCh <-chan proto.Message) *Node
 		Commits:     make(map[int64]map[string]*pb.CommitRequest),
 
 		PendingRequests:    []*pb.ClientRequest{},
-		InProgressRequests: 0,
+		InProgressRequests: make(map[int64]any),
 
 		CurrentView: 0,
 		LeaderId:    leaderElection.GetLeader(0),
@@ -78,13 +82,26 @@ func (n *Node) Run() {
 	n.ViewChangeTimer = time.NewTimer(time.Second)
 	n.ViewChangeTimer.Stop()
 
+	clientRequestTicker := time.NewTicker(10 * time.Millisecond)
+	var requestBatch []*pb.ClientRequest
 	for {
 		select {
+		case request := <-n.RequestCh:
+			if len(requestBatch) > 40 {
+				continue
+			}
+			requestBatch = append(requestBatch, request)
 		case input := <-n.InputCh:
 			n.handleInput(input)
 		case <-n.ViewChangeTimer.C:
 			n.RunningTimer = false
 			n.goToViewChange()
+		case <-clientRequestTicker.C:
+			if len(requestBatch) == 0 {
+				continue
+			}
+			n.handleClientRequest(requestBatch)
+			requestBatch = []*pb.ClientRequest{}
 		}
 	}
 }
@@ -97,14 +114,11 @@ func (n *Node) setViewChangeTimer() {
 	}
 
 	n.RunningTimer = true
-	n.ViewChangeTimer.Stop()
 	n.ViewChangeTimer.Reset(time.Duration(n.Config.Timers.ViewChangeTimeoutMs) * time.Millisecond)
 }
 
 func (n *Node) handleInput(input proto.Message) {
 	switch msg := input.(type) {
-	case *pb.ClientRequest:
-		n.handleClientRequest([]*pb.ClientRequest{msg})
 	case *pb.PiggyBackedPrePareRequest:
 		n.handlePrePrepareRequest(msg)
 	case *pb.PrepareRequest:
@@ -145,14 +159,14 @@ func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
 
 	log.WithField("request", msgs[0].String()).Info("Received client request")
 
-	if n.InProgressRequests >= n.Config.General.MaxOutstandingRequests {
+	if len(n.InProgressRequests) >= n.Config.General.MaxOutstandingRequests {
 		log.Warn("Too many outstanding requests, putting request in pending queue")
 		n.PendingRequests = append(n.PendingRequests, msgs...)
 		return
 	}
 
 	n.LastSequenceNumber++
-	n.InProgressRequests++
+	n.InProgressRequests[n.LastSequenceNumber] = struct{}{}
 	prepreareMessage := &pb.PiggyBackedPrePareRequest{
 		PrePrepareRequest: &pb.PrePrepareRequest{
 			ViewId:         n.CurrentView,
@@ -160,9 +174,9 @@ func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
 		},
 		Requests: msgs,
 	}
-	n.Preprepares[int64(n.LastSequenceNumber)] = prepreareMessage.PrePrepareRequest
+	n.Preprepares[n.LastSequenceNumber] = prepreareMessage.PrePrepareRequest
 
-	n.Store.AddRequests(int64(n.LastSequenceNumber), msgs)
+	n.Store.AddRequests(n.LastSequenceNumber, msgs)
 	n.Sender.Broadcast("PrePrepare", prepreareMessage)
 }
 
@@ -188,9 +202,8 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 		return
 	}
 
-	n.InProgressRequests++
-
 	sequenceNumber := msg.PrePrepareRequest.SequenceNumber
+	n.InProgressRequests[sequenceNumber] = struct{}{}
 	n.Preprepares[sequenceNumber] = msg.PrePrepareRequest
 
 	prepareMessage := &pb.PrepareRequest{
@@ -274,8 +287,8 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 	if len(n.Commits[sequenceNumber]) == 2*n.Config.F()+1 {
 		reqs, resps, checkpoint := n.Store.Commit(msg)
 
-		n.InProgressRequests--
-		if n.InProgressRequests == 0 {
+		delete(n.InProgressRequests, sequenceNumber)
+		if len(n.InProgressRequests) == 0 {
 			n.ViewChangeTimer.Stop()
 		}
 
@@ -294,7 +307,7 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 			n.Sender.SendRPCToClient(req.Callback, "Response", reply)
 		}
 
-		if n.InProgressRequests < n.Config.General.MaxOutstandingRequests && len(n.PendingRequests) > 0 {
+		if len(n.InProgressRequests) < n.Config.General.MaxOutstandingRequests && len(n.PendingRequests) > 0 {
 			n.handleClientRequest(n.PendingRequests)
 			n.PendingRequests = []*pb.ClientRequest{}
 		}
@@ -325,6 +338,15 @@ func (n *Node) handleCheckpointRequest(msg *pb.CheckpointRequest) {
 		if seqNo <= *stableSequenceNumber {
 			delete(n.Commits, seqNo)
 		}
+	}
+
+	for req := range n.InProgressRequests {
+		if req <= *stableSequenceNumber {
+			delete(n.InProgressRequests, req)
+		}
+	}
+	if len(n.InProgressRequests) == 0 {
+		n.ViewChangeTimer.Stop()
 	}
 }
 

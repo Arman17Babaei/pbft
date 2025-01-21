@@ -49,7 +49,7 @@ func (rc *ResponseCollection) AddResponse(response *pb.ClientResponse) {
 	rc.collection[response.Result.Value][response.ReplicaId] = response
 }
 
-func (rc *ResponseCollection) GetSize(value string) int {
+func (rc *ResponseCollection) GetSize(_ string) int {
 	rc.mu.RLock()
 	defer rc.mu.RUnlock()
 
@@ -132,6 +132,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 	if err != nil {
 		log.WithError(err).WithField("target", target).Error("error creating pbft client")
 	}
+	defer conn.Close()
 
 	// Send request to the leader
 	leaderClient := pb.NewPbftClient(conn)
@@ -151,7 +152,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 
 	_, err = leaderClient.Request(ctx, clientRequest)
 	if err != nil {
-		log.WithError(err).Error("error sending request to leader")
+		log.WithError(err).Warn("error sending request to leader")
 		return err
 	}
 
@@ -159,7 +160,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 	return nil
 }
 
-func (c *Client) Response(ctx context.Context, response *pb.ClientResponse) (*pb.EmptyResponse, error) {
+func (c *Client) Response(_ context.Context, response *pb.ClientResponse) (*pb.EmptyResponse, error) {
 	log.Debug("client.response")
 	c.mu.Lock()
 	defer c.mu.Unlock()

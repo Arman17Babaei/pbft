@@ -47,13 +47,13 @@ func (s *Sender) Broadcast(method string, message proto.Message) {
 }
 
 func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Message) {
-	ants.Submit(func() {
+	_ = ants.Submit(func() {
 		s.sendRPCToPeer(s.peers[peerID], method, message)
 	})
 }
 
 func (s *Sender) SendRPCToClient(clientAddress, method string, message proto.Message) {
-	ants.Submit(func() {
+	_ = ants.Submit(func() {
 		s.sendRPCToClient(clientAddress, method, message)
 	})
 }
@@ -75,7 +75,7 @@ func (s *Sender) sendRPCToClient(clientAddress, method string, message proto.Mes
 	switch method {
 	case "Response":
 		if _, err := pb.NewClientClient(c).Response(ctx, message.(*pb.ClientResponse)); err != nil {
-			log.WithError(err).Error("failed to send Reply")
+			log.WithError(err).Warn("failed to send Reply")
 		}
 	default:
 		log.Error("unknown method")

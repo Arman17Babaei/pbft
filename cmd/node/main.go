@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/Arman17Babaei/pbft/config"
 	"github.com/Arman17Babaei/pbft/pbft"
+	pb "github.com/Arman17Babaei/pbft/proto"
 	"github.com/alecthomas/kong"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -43,9 +44,10 @@ func main() {
 
 func startNode(config pbft.Config) {
 	inputCh := make(chan proto.Message)
-	service := pbft.NewService(inputCh, &config)
+	requestCh := make(chan *pb.ClientRequest)
+	service := pbft.NewService(inputCh, requestCh, &config)
 	sender := pbft.NewSender(&config)
-	node := pbft.NewNode(&config, sender, inputCh)
+	node := pbft.NewNode(&config, sender, inputCh, requestCh)
 
 	go node.Run()
 	go service.Serve()

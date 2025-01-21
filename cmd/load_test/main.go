@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	log.SetLevel(log.FatalLevel)
+	log.SetLevel(log.ErrorLevel)
 	var loadTesterConfig load_tester.Config
 	err := config.LoadConfig(&loadTesterConfig, "load_tester")
 	if err != nil {
@@ -16,5 +16,4 @@ func main() {
 
 	loadTester := load_tester.NewLoadTest(&loadTesterConfig)
 	loadTester.Run()
-
 }
