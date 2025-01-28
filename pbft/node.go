@@ -1,7 +1,6 @@
 package pbft
 
 import (
-	"sync"
 	"time"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
@@ -17,7 +16,6 @@ const (
 )
 
 type Node struct {
-	Mu        sync.Mutex
 	Config    *Config
 	Sender    *Sender
 	Role      Role
@@ -43,10 +41,19 @@ type Node struct {
 	LeaderId           string
 	LastSequenceNumber int64
 
-	Logs []string
+	Enabled   bool
+	EnableCh  <-chan any
+	DisableCh <-chan any
 }
 
-func NewNode(config *Config, sender *Sender, inputCh <-chan proto.Message, requestCh <-chan *pb.ClientRequest) *Node {
+func NewNode(
+	config *Config,
+	sender *Sender,
+	inputCh <-chan proto.Message,
+	requestCh <-chan *pb.ClientRequest,
+	enableCh <-chan any,
+	disableCh <-chan any,
+) *Node {
 	leaderElection := NewRoundRobinLeaderElection(config)
 	role := Backup
 	if leaderElection.GetLeader(0) == config.Id {
@@ -75,6 +82,10 @@ func NewNode(config *Config, sender *Sender, inputCh <-chan proto.Message, reque
 
 		CurrentView: 0,
 		LeaderId:    leaderElection.GetLeader(0),
+
+		Enabled:   config.General.EnabledByDefault,
+		EnableCh:  enableCh,
+		DisableCh: disableCh,
 	}
 }
 
@@ -85,6 +96,12 @@ func (n *Node) Run() {
 	clientRequestTicker := time.NewTicker(10 * time.Millisecond)
 	var requestBatch []*pb.ClientRequest
 	for {
+		if !n.Enabled {
+			<-n.EnableCh
+			n.Enabled = true
+			exhaustChannel(n.DisableCh)
+		}
+
 		select {
 		case request := <-n.RequestCh:
 			if len(requestBatch) > 40 {
@@ -102,6 +119,20 @@ func (n *Node) Run() {
 			}
 			n.handleClientRequest(requestBatch)
 			requestBatch = []*pb.ClientRequest{}
+		case <-n.DisableCh:
+			n.Enabled = false
+			exhaustChannel(n.EnableCh)
+		}
+	}
+}
+
+func exhaustChannel[T any](channel <-chan T) {
+	for {
+		select {
+		case <-channel:
+			continue
+		default:
+			return
 		}
 	}
 }
@@ -213,7 +244,6 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 		ReplicaId:      n.Config.Id,
 	}
 
-	// TODO: should I overwrite prepares or append (it should be a rare case anyway)
 	n.Prepares[sequenceNumber] = make(map[string]*pb.PrepareRequest)
 	n.Prepares[sequenceNumber][n.Config.Id] = prepareMessage
 
@@ -351,13 +381,15 @@ func (n *Node) handleCheckpointRequest(msg *pb.CheckpointRequest) {
 }
 
 func (n *Node) goToViewChange() {
+	log.WithField("node id", n.Config.Id).WithField("leader", n.LeaderElection.GetLeader(n.CurrentView)).Error("view changing")
+	n.setViewChangeTimer()
 	n.IsInViewChange = true
 	n.CurrentView++
-	prepreparedProof := []*pb.ViewChangePreparedMessage{}
+	var prepreparedProof []*pb.ViewChangePreparedMessage
 
 	for seqNo := range n.Commits {
 		preprepare := n.Preprepares[seqNo]
-		prepareMessages := []*pb.PrepareRequest{}
+		var prepareMessages []*pb.PrepareRequest
 		if len(n.Prepares[seqNo]) > n.Config.F()*2+1 {
 			break
 		}
@@ -380,15 +412,20 @@ func (n *Node) goToViewChange() {
 		ReplicaId:                n.Config.Id,
 	}
 
-	n.Sender.SendRPCToPeer(
-		n.LeaderElection.GetLeader(n.CurrentView),
-		"ViewChange",
-		viewChangeRequest,
-	)
+	if n.LeaderElection.GetLeader(n.CurrentView) == n.Config.Id {
+		n.handleViewChangeRequest(viewChangeRequest)
+	} else {
+		n.Sender.SendRPCToPeer(
+			n.LeaderElection.GetLeader(n.CurrentView),
+			"ViewChange",
+			viewChangeRequest,
+		)
+	}
 }
 
 func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
 	log.WithField("request", msg.String()).Info("Received view change request")
+	log.WithField("backup id", msg.ReplicaId).Error("received view change request")
 
 	if msg.NewViewId < n.CurrentView {
 		log.WithField("request", msg.String()).WithField("current-view", n.CurrentView).Warn("Received view change request with old view")
@@ -404,6 +441,7 @@ func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
 		n.ViewChanges[msg.NewViewId] = make(map[string]*pb.ViewChangeRequest)
 	}
 	n.ViewChanges[msg.NewViewId][msg.ReplicaId] = msg
+	log.WithField("backup id", msg.ReplicaId).WithField("len", len(n.ViewChanges[msg.NewViewId])).Error("applied view change message")
 
 	if len(n.ViewChanges[msg.NewViewId]) == 2*n.Config.F()+1 {
 		minSeq := n.Store.GetLastStableSequenceNumber()

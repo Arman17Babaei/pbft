@@ -26,6 +26,7 @@ timers:
   view_change_timeout_ms: 3000
 
 general:
+  enabled_by_default: true
   max_outstanding_requests: 200
   checkpoint_interval: 100
   water_mark_interval: 300

@@ -1,0 +1,7 @@
+syntax = "proto3";
+package pbft;
+
+option go_package = ".";
+
+message Empty {
+}

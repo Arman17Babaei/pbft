@@ -90,6 +90,7 @@ func (s *Store) AddRequests(sequenceNumber int64, reqs []*pb.ClientRequest) {
 }
 
 func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.OperationResult, *pb.CheckpointRequest) {
+	// TODO: add when all to this point has been committed
 	log.WithField("request", commit.String()).Debug("committing request")
 
 	reqs := s.requests[commit.SequenceNumber]

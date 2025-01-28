@@ -136,7 +136,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 
 	// Send request to the leader
 	leaderClient := pb.NewPbftClient(conn)
-	// context with timeout
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.config.GrpcTimeoutMs)*time.Millisecond)
 	defer cancel()
 
@@ -160,7 +160,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 	return nil
 }
 
-func (c *Client) Response(_ context.Context, response *pb.ClientResponse) (*pb.EmptyResponse, error) {
+func (c *Client) Response(_ context.Context, response *pb.ClientResponse) (*pb.Empty, error) {
 	log.Debug("client.response")
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -176,5 +176,5 @@ func (c *Client) Response(_ context.Context, response *pb.ClientResponse) (*pb.E
 		c.callbackChannels[response.TimestampMs] <- c.collectedResponse[response.TimestampMs].GetResponse().Result
 	}
 
-	return &pb.EmptyResponse{}, nil
+	return &pb.Empty{}, nil
 }

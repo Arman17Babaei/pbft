@@ -24,9 +24,10 @@ type Timers struct {
 }
 
 type General struct {
-	MaxOutstandingRequests int `mapstructure:"max_outstanding_requests"`
-	CheckpointInterval     int `mapstructure:"checkpoint_interval"`
-	WaterMarkInterval      int `mapstructure:"water_mark_interval"`
+	EnabledByDefault       bool `mapstructure:"enabled_by_default"`
+	MaxOutstandingRequests int  `mapstructure:"max_outstanding_requests"`
+	CheckpointInterval     int  `mapstructure:"checkpoint_interval"`
+	WaterMarkInterval      int  `mapstructure:"water_mark_interval"`
 }
 
 func (c *Config) F() int {

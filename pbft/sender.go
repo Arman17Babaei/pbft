@@ -104,31 +104,31 @@ func (s *Sender) sendRPCToPeer(peerAddress *Address, method string, message prot
 	switch method {
 	case "Request":
 		if _, err := pb.NewPbftClient(c).Request(ctx, message.(*pb.ClientRequest)); err != nil {
-			log.WithError(err).Error("failed to send Request")
+			log.WithError(err).Warn("failed to send Request")
 		}
 	case "PrePrepare":
 		if _, err := pb.NewPbftClient(c).PrePrepare(ctx, message.(*pb.PiggyBackedPrePareRequest)); err != nil {
-			log.WithError(err).Error("failed to send PrePrepare")
+			log.WithError(err).Warn("failed to send PrePrepare")
 		}
 	case "Prepare":
 		if _, err := pb.NewPbftClient(c).Prepare(ctx, message.(*pb.PrepareRequest)); err != nil {
-			log.WithError(err).Error("failed to send Prepare")
+			log.WithError(err).Warn("failed to send Prepare")
 		}
 	case "Commit":
 		if _, err := pb.NewPbftClient(c).Commit(ctx, message.(*pb.CommitRequest)); err != nil {
-			log.WithError(err).Error("failed to send Commit")
+			log.WithError(err).Warn("failed to send Commit")
 		}
 	case "Checkpoint":
 		if _, err := pb.NewPbftClient(c).Checkpoint(ctx, message.(*pb.CheckpointRequest)); err != nil {
-			log.WithError(err).Error("failed to send Checkpoint")
+			log.WithError(err).Warn("failed to send Checkpoint")
 		}
 	case "ViewChange":
 		if _, err := pb.NewPbftClient(c).ViewChange(ctx, message.(*pb.ViewChangeRequest)); err != nil {
-			log.WithError(err).Error("failed to send ViewChange")
+			log.WithError(err).Warn("failed to send ViewChange")
 		}
 	case "NewView":
 		if _, err := pb.NewPbftClient(c).NewView(ctx, message.(*pb.NewViewRequest)); err != nil {
-			log.WithError(err).Error("failed to send NewView")
+			log.WithError(err).Warn("failed to send NewView")
 		}
 	default:
 		log.Error("unknown method")

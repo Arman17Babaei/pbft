@@ -17,14 +17,25 @@ type Service struct {
 	config     *Config
 	inputCh    chan<- proto.Message
 	requestCh  chan<- *pb.ClientRequest
+	enableCh   chan<- any
+	disableCh  chan<- any
 	listener   net.Listener
 	grpcServer *grpc.Server
+
+	Enabled bool
 
 	pb.UnimplementedPbftServer
 }
 
-func NewService(inputCh chan<- proto.Message, requestCh chan<- *pb.ClientRequest, config *Config) *Service {
-	service := &Service{config: config, inputCh: inputCh, requestCh: requestCh}
+func NewService(inputCh chan<- proto.Message, requestCh chan<- *pb.ClientRequest, enableCh chan<- any, disableCh chan<- any, config *Config) *Service {
+	service := &Service{
+		config:    config,
+		inputCh:   inputCh,
+		requestCh: requestCh,
+		enableCh:  enableCh,
+		disableCh: disableCh,
+		Enabled:   config.General.EnabledByDefault,
+	}
 
 	var err error
 	service.listener, err = net.Listen("tcp", fmt.Sprintf("%s:%d", config.Address.Host, config.Address.Port))
@@ -47,16 +58,21 @@ func (s *Service) Serve() {
 }
 
 func (s *Service) Request(_ context.Context, req *pb.ClientRequest) (*pb.Empty, error) {
-	log.WithField("request", req).Info("client request received")
-	select {
-	case s.requestCh <- req:
-	default:
+	if !s.Enabled {
+		return &pb.Empty{}, nil
 	}
+
+	log.WithField("request", req).Info("client request received")
+	putOrIgnore(s.requestCh, req)
 
 	return &pb.Empty{}, nil
 }
 
 func (s *Service) PrePrepare(_ context.Context, req *pb.PiggyBackedPrePareRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
 	log.WithField("request", req).Info("pre-prepare request received")
 	s.inputCh <- req
 
@@ -64,6 +80,10 @@ func (s *Service) PrePrepare(_ context.Context, req *pb.PiggyBackedPrePareReques
 }
 
 func (s *Service) Prepare(_ context.Context, req *pb.PrepareRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
 	log.WithField("request", req).Info("prepare request received")
 	s.inputCh <- req
 
@@ -71,6 +91,10 @@ func (s *Service) Prepare(_ context.Context, req *pb.PrepareRequest) (*pb.Empty,
 }
 
 func (s *Service) Commit(_ context.Context, req *pb.CommitRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
 	log.WithField("request", req).Info("commit request received")
 	s.inputCh <- req
 
@@ -78,6 +102,10 @@ func (s *Service) Commit(_ context.Context, req *pb.CommitRequest) (*pb.Empty, e
 }
 
 func (s *Service) Checkpoint(_ context.Context, req *pb.CheckpointRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
 	log.WithField("request", req).Info("checkpoint request received")
 	s.inputCh <- req
 
@@ -85,6 +113,10 @@ func (s *Service) Checkpoint(_ context.Context, req *pb.CheckpointRequest) (*pb.
 }
 
 func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
 	log.WithField("request", req).Info("view-change request received")
 	s.inputCh <- req
 
@@ -92,8 +124,39 @@ func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.
 }
 
 func (s *Service) NewView(_ context.Context, req *pb.NewViewRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
 	log.WithField("request", req).Info("new-view request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
+}
+
+func (s *Service) Enable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
+	log.Info("enable request received")
+	putOrIgnore[any](s.disableCh, req)
+
+	s.Enabled = true
+
+	return &pb.Empty{}, nil
+}
+
+func (s *Service) Disable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
+	log.Info("disable request received")
+	putOrIgnore[any](s.disableCh, req)
+
+	s.Enabled = false
+
+	return &pb.Empty{}, nil
+}
+
+func putOrIgnore[T any](channel chan<- T, value T) bool {
+	select {
+	case channel <- value:
+		return true
+	default:
+		return false
+	}
 }

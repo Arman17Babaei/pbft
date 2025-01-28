@@ -3,6 +3,8 @@ syntax = "proto3";
 package pbft;
 option go_package = ".";
 
+import "general.proto";
+
 message ClientRequest {
     string client_id = 1; // Unique identifier for the client
     int64 timestamp_ms = 2;        // Unique identifier for the request
@@ -78,9 +80,6 @@ message NewViewRequest {
     string replica_id = 4;       // Identifier of the replica that sent the new view
 }
 
-message Empty {
-}
-
 // gRPC service definition
 service Pbft {
     // Send a client request
@@ -103,4 +102,10 @@ service Pbft {
 
     // Send a NewView message
     rpc NewView(NewViewRequest) returns (Empty);
+
+    // Enable node
+    rpc Enable(Empty) returns (Empty);
+
+    // Disable node
+    rpc Disable(Empty) returns (Empty);
 }
