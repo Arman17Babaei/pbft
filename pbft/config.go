@@ -16,6 +16,7 @@ type Address struct {
 
 type Grpc struct {
 	SendTimeoutMs        int `mapstructure:"send_timeout_ms"`
+	MaxRetries           int `mapstructure:"max_retries"`
 	MaxConcurrentStreams int `mapstructure:"max_concurrent_streams"`
 }
 

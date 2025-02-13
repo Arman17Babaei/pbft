@@ -3,6 +3,7 @@ package pbft
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/panjf2000/ants/v2"
@@ -15,8 +16,11 @@ import (
 )
 
 type Sender struct {
+	mu          *sync.RWMutex
 	sendTimeout time.Duration
-	peers       map[string]*Address
+	maxRetries  int
+	clients     map[string]pb.ClientClient
+	pbftClients map[string]pb.PbftClient
 	pool        *ants.Pool
 }
 
@@ -25,56 +29,86 @@ func NewSender(config *Config) *Sender {
 	if err != nil {
 		log.WithError(err).Fatal("failed to create pool")
 	}
-	peers := make(map[string]*Address)
+	pbftClients := make(map[string]pb.PbftClient)
 	for id, addr := range config.PeersAddress {
-		if id != config.Id {
-			peers[id] = addr
+		if id == config.Id {
+			continue
 		}
+
+		c, err := grpc.NewClient(
+			fmt.Sprintf("%s:%d", addr.Host, addr.Port),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+
+		if err != nil {
+			log.WithError(err).Error("failed to create client")
+		}
+
+		pbftClients[id] = pb.NewPbftClient(c)
 	}
 
 	return &Sender{
+		mu:          &sync.RWMutex{},
 		sendTimeout: time.Duration(config.Grpc.SendTimeoutMs) * time.Millisecond,
-		peers:       peers,
+		maxRetries:  config.Grpc.MaxRetries,
+		clients:     make(map[string]pb.ClientClient),
+		pbftClients: pbftClients,
 		pool:        pool,
 	}
 }
 
 func (s *Sender) Broadcast(method string, message proto.Message) {
 	log.WithField("method", method).Debug("broadcast message")
-	for id := range s.peers {
+	for id := range s.pbftClients {
 		s.SendRPCToPeer(id, method, message)
 	}
 }
 
 func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Message) {
-	_ = ants.Submit(func() {
-		s.sendRPCToPeer(s.peers[peerID], method, message)
+	_ = s.pool.Submit(func() {
+		for i := 0; i < s.maxRetries; i++ {
+			if s.sendRPCToPeer(s.pbftClients[peerID], method, message) {
+				log.WithField("method", method).WithField("peer", peerID).Debug("message sent")
+				return
+			}
+		}
 	})
 }
 
 func (s *Sender) SendRPCToClient(clientAddress, method string, message proto.Message) {
-	_ = ants.Submit(func() {
+	_ = s.pool.Submit(func() {
 		s.sendRPCToClient(clientAddress, method, message)
 	})
 }
 
 func (s *Sender) sendRPCToClient(clientAddress, method string, message proto.Message) {
-	c, err := grpc.NewClient(
-		clientAddress,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		log.WithError(err).Error("failed to create client")
-		return
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.clients[clientAddress]; !ok {
+		var err error
+		c, err := grpc.NewClient(
+			clientAddress,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+
+		if err != nil {
+			log.WithError(err).Error("failed to create client")
+			return
+		}
+
+		s.mu.RUnlock()
+		s.mu.Lock()
+		s.clients[clientAddress] = pb.NewClientClient(c)
+		s.mu.Unlock()
+		s.mu.RLock()
 	}
-	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.sendTimeout)
 	defer cancel()
 
 	switch method {
 	case "Response":
-		if _, err := pb.NewClientClient(c).Response(ctx, message.(*pb.ClientResponse)); err != nil {
+		if _, err := s.clients[clientAddress].Response(ctx, message.(*pb.ClientResponse)); err != nil {
 			log.WithError(err).Warn("failed to send Reply")
 		}
 	default:
@@ -82,55 +116,65 @@ func (s *Sender) sendRPCToClient(clientAddress, method string, message proto.Mes
 	}
 }
 
-func (s *Sender) sendRPCToPeer(peerAddress *Address, method string, message proto.Message) {
-	if peerAddress == nil {
+func (s *Sender) sendRPCToPeer(client pb.PbftClient, method string, message proto.Message) bool {
+	if client == nil {
 		log.Error("peer address is nil")
-		return
+		return false
 	}
-
-	c, err := grpc.NewClient(
-		fmt.Sprintf("%s:%d", peerAddress.Host, peerAddress.Port),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		log.WithError(err).Error("failed to create client")
-		return
-	}
-	defer c.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.sendTimeout)
 	defer cancel()
 
 	switch method {
 	case "Request":
-		if _, err := pb.NewPbftClient(c).Request(ctx, message.(*pb.ClientRequest)); err != nil {
-			log.WithError(err).Warn("failed to send Request")
+		if _, err := client.Request(ctx, message.(*pb.ClientRequest)); err != nil {
+			log.WithError(err).Error("failed to send Request")
+			return false
 		}
 	case "PrePrepare":
-		if _, err := pb.NewPbftClient(c).PrePrepare(ctx, message.(*pb.PiggyBackedPrePareRequest)); err != nil {
-			log.WithError(err).Warn("failed to send PrePrepare")
+		if _, err := client.PrePrepare(ctx, message.(*pb.PiggyBackedPrePareRequest)); err != nil {
+			log.WithError(err).Error("failed to send PrePrepare")
+			return false
 		}
 	case "Prepare":
-		if _, err := pb.NewPbftClient(c).Prepare(ctx, message.(*pb.PrepareRequest)); err != nil {
-			log.WithError(err).Warn("failed to send Prepare")
+		if _, err := client.Prepare(ctx, message.(*pb.PrepareRequest)); err != nil {
+			log.WithError(err).Error("failed to send Prepare")
+			return false
 		}
 	case "Commit":
-		if _, err := pb.NewPbftClient(c).Commit(ctx, message.(*pb.CommitRequest)); err != nil {
-			log.WithError(err).Warn("failed to send Commit")
+		if _, err := client.Commit(ctx, message.(*pb.CommitRequest)); err != nil {
+			log.WithError(err).Error("failed to send Commit")
+			return false
 		}
 	case "Checkpoint":
-		if _, err := pb.NewPbftClient(c).Checkpoint(ctx, message.(*pb.CheckpointRequest)); err != nil {
-			log.WithError(err).Warn("failed to send Checkpoint")
+		if _, err := client.Checkpoint(ctx, message.(*pb.CheckpointRequest)); err != nil {
+			log.WithError(err).Error("failed to send Checkpoint")
+			return false
 		}
 	case "ViewChange":
-		if _, err := pb.NewPbftClient(c).ViewChange(ctx, message.(*pb.ViewChangeRequest)); err != nil {
-			log.WithError(err).Warn("failed to send ViewChange")
+		if _, err := client.ViewChange(ctx, message.(*pb.ViewChangeRequest)); err != nil {
+			log.WithError(err).Error("failed to send ViewChange")
+			return false
 		}
 	case "NewView":
-		if _, err := pb.NewPbftClient(c).NewView(ctx, message.(*pb.NewViewRequest)); err != nil {
-			log.WithError(err).Warn("failed to send NewView")
+		if _, err := client.NewView(ctx, message.(*pb.NewViewRequest)); err != nil {
+			log.WithError(err).Error("failed to send NewView")
+			return false
+		}
+	case "GetStatus":
+		if _, err := client.GetStatus(ctx, message.(*pb.StatusRequest)); err != nil {
+			log.WithError(err).Error("failed to send GetStatus")
+			return false
+		}
+	case "Status":
+		if _, err := client.Status(ctx, message.(*pb.StatusResponse)); err != nil {
+			log.WithError(err).Error("failed to send Status")
+			return false
 		}
 	default:
 		log.Error("unknown method")
+		return false
 	}
+
+	return true
 }

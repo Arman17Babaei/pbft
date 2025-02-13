@@ -19,14 +19,15 @@ peers_address:
     port: 5004
 
 grpc:
-  send_timeout_ms: 1000
-  max_concurrent_streams: 100
+  send_timeout_ms: 2000
+  max_retries: 5
+  max_concurrent_streams: 1000
 
 timers:
-  view_change_timeout_ms: 3000
+  view_change_timeout_ms: 10000
 
 general:
   enabled_by_default: true
-  max_outstanding_requests: 200
-  checkpoint_interval: 100
-  water_mark_interval: 300
+  max_outstanding_requests: 10
+  checkpoint_interval: 5
+  water_mark_interval: 15

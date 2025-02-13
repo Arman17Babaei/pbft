@@ -3,7 +3,7 @@ package load_tester
 import (
 	"fmt"
 	"github.com/Arman17Babaei/pbft/client"
-	"github.com/Arman17Babaei/pbft/config"
+	loader "github.com/Arman17Babaei/pbft/config"
 	loadtestconfig "github.com/Arman17Babaei/pbft/load_tester/config"
 	"github.com/Arman17Babaei/pbft/load_tester/scenarios"
 	"github.com/Arman17Babaei/pbft/pbft"
@@ -23,7 +23,7 @@ type LoadTest struct {
 func NewLoadTest(c *loadtestconfig.Config) *LoadTest {
 	l := &LoadTest{config: c}
 	var pbftConfig pbft.Config
-	err := config.LoadConfig(&pbftConfig, "pbft")
+	err := loader.LoadConfig(&pbftConfig, "pbft")
 	if err != nil {
 		log.WithError(err).Fatal("could not load config")
 	}
@@ -39,7 +39,7 @@ func NewLoadTest(c *loadtestconfig.Config) *LoadTest {
 	}
 
 	var clientConfig client.Config
-	err = config.LoadConfig(&clientConfig, "client")
+	err = loader.LoadConfig(&clientConfig, "client")
 	if err != nil {
 		log.WithError(err).Fatal("could not load config")
 	}

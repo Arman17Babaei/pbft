@@ -10,7 +10,8 @@ import (
 )
 
 type CLI struct {
-	Cluster bool `help:"Run the all nodes of pbft config."`
+	Id      string `help:"Alternative ID for what's in pbft config.'"`
+	Cluster bool   `help:"Run the all nodes of pbft config."`
 }
 
 func main() {
@@ -35,6 +36,15 @@ func main() {
 		}
 	} else {
 		log.Info("Running single node")
+		if len(cli.Id) > 0 {
+			if _, ok := pbftConfig.PeersAddress[cli.Id]; !ok {
+				log.WithField("id", cli.Id).Error("Address not specified in config, ignoring ID")
+			} else {
+				pbftConfig.Address = pbftConfig.PeersAddress[cli.Id]
+				pbftConfig.Id = cli.Id
+				log.WithField("id", pbftConfig.Id).Info("Replaced config ID")
+			}
+		}
 		startNode(pbftConfig)
 	}
 
@@ -45,9 +55,11 @@ func main() {
 func startNode(config pbft.Config) {
 	inputCh := make(chan proto.Message)
 	requestCh := make(chan *pb.ClientRequest)
-	service := pbft.NewService(inputCh, requestCh, &config)
+	enableCh := make(chan any)
+	disableCh := make(chan any)
+	service := pbft.NewService(inputCh, requestCh, enableCh, disableCh, &config)
 	sender := pbft.NewSender(&config)
-	node := pbft.NewNode(&config, sender, inputCh, requestCh)
+	node := pbft.NewNode(&config, sender, inputCh, requestCh, enableCh, disableCh)
 
 	go node.Run()
 	go service.Serve()

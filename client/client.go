@@ -3,7 +3,9 @@ package client
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -14,8 +16,9 @@ import (
 )
 
 type Client struct {
-	mu     sync.Mutex
-	config *Config
+	mu        sync.Mutex
+	config    *Config
+	nodeNames []string
 
 	listener          net.Listener
 	grpcServer        *grpc.Server
@@ -98,15 +101,16 @@ func NewClient(config *Config) *Client {
 		log.WithError(err).Fatal("failed to listen")
 	}
 
-	grpc.WithTransportCredentials(insecure.NewCredentials())
-	client.grpcServer = grpc.NewServer()
+	client.grpcServer = grpc.NewServer(grpc.MaxConcurrentStreams(100))
 	pb.RegisterClientServer(client.grpcServer, client)
 
-	// current leader
+	client.nodeNames = make([]string, 0, len(config.NodesAddress))
 	for id := range config.NodesAddress {
-		client.currentLeader = id
-		break
+		client.nodeNames = append(client.nodeNames, id)
 	}
+	sort.Strings(client.nodeNames)
+
+	client.currentLeader = client.nodeNames[rand.Intn(len(client.nodeNames))]
 
 	return client
 }
@@ -156,7 +160,8 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 		return err
 	}
 
-	log.Info("request sent to leader")
+	log.WithField("leader", c.currentLeader).Info("request sent to leader")
+	c.currentLeader = c.nodeNames[rand.Intn(len(c.nodeNames))]
 	return nil
 }
 

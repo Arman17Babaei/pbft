@@ -59,11 +59,15 @@ func (s *Service) Serve() {
 
 func (s *Service) Request(_ context.Context, req *pb.ClientRequest) (*pb.Empty, error) {
 	if !s.Enabled {
-		return &pb.Empty{}, nil
+		return nil, fmt.Errorf("service is disabled")
 	}
 
-	log.WithField("request", req).Info("client request received")
-	putOrIgnore(s.requestCh, req)
+	log.WithField("my-id", s.config.Id).WithField("request", req).Info("client request received")
+	isPut := putOrIgnore(s.requestCh, req)
+
+	if !isPut {
+		return nil, fmt.Errorf("request channel is full")
+	}
 
 	return &pb.Empty{}, nil
 }
@@ -73,7 +77,7 @@ func (s *Service) PrePrepare(_ context.Context, req *pb.PiggyBackedPrePareReques
 		return &pb.Empty{}, nil
 	}
 
-	log.WithField("request", req).Info("pre-prepare request received")
+	log.WithField("my-id", s.config.Id).WithField("request", req).Info("pre-prepare request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
@@ -84,7 +88,7 @@ func (s *Service) Prepare(_ context.Context, req *pb.PrepareRequest) (*pb.Empty,
 		return &pb.Empty{}, nil
 	}
 
-	log.WithField("request", req).Info("prepare request received")
+	log.WithField("my-id", s.config.Id).WithField("request", req).Info("prepare request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
@@ -95,7 +99,7 @@ func (s *Service) Commit(_ context.Context, req *pb.CommitRequest) (*pb.Empty, e
 		return &pb.Empty{}, nil
 	}
 
-	log.WithField("request", req).Info("commit request received")
+	log.WithField("my-id", s.config.Id).WithField("request", req).Info("commit request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
@@ -106,7 +110,7 @@ func (s *Service) Checkpoint(_ context.Context, req *pb.CheckpointRequest) (*pb.
 		return &pb.Empty{}, nil
 	}
 
-	log.WithField("request", req).Info("checkpoint request received")
+	log.WithField("my-id", s.config.Id).WithField("request", req).Info("checkpoint request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
@@ -117,7 +121,7 @@ func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.
 		return &pb.Empty{}, nil
 	}
 
-	log.WithField("request", req).Info("view-change request received")
+	log.WithField("my-id", s.config.Id).WithField("niew-view", req.GetNewViewId()).Info("view-change request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
@@ -128,15 +132,35 @@ func (s *Service) NewView(_ context.Context, req *pb.NewViewRequest) (*pb.Empty,
 		return &pb.Empty{}, nil
 	}
 
-	log.WithField("request", req).Info("new-view request received")
+	log.WithField("my-id", s.config.Id).WithField("new-view-id", req.NewViewId).WithField("leader-id", req.ReplicaId).Info("new-view request received")
 	s.inputCh <- req
 
 	return &pb.Empty{}, nil
 }
 
+func (s *Service) GetStatus(_ context.Context, req *pb.StatusRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
+	log.WithField("my-id", s.config.Id).Info("checkpoint request received")
+	s.inputCh <- req
+	return &pb.Empty{}, nil
+}
+
+func (s *Service) Status(_ context.Context, req *pb.StatusResponse) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
+	}
+
+	log.WithField("my-id", s.config.Id).Info("status request received")
+	s.inputCh <- req
+	return &pb.Empty{}, nil
+}
+
 func (s *Service) Enable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
-	log.Info("enable request received")
-	putOrIgnore[any](s.disableCh, req)
+	log.WithField("my-id", s.config.Id).Info("enable request received")
+	putOrIgnore[any](s.enableCh, req)
 
 	s.Enabled = true
 
@@ -144,7 +168,7 @@ func (s *Service) Enable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
 }
 
 func (s *Service) Disable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
-	log.Info("disable request received")
+	log.WithField("my-id", s.config.Id).Info("disable request received")
 	putOrIgnore[any](s.disableCh, req)
 
 	s.Enabled = false

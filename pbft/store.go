@@ -22,20 +22,24 @@ type State struct {
 }
 
 type Store struct {
-	config               *Config
-	unstableCheckpoints  map[CheckpointId]*CheckpointProof
-	lastStableCheckpoint *CheckpointProof
-	state                *State
-	requests             map[int64][]*pb.ClientRequest
+	config                    *Config
+	unstableCheckpoints       map[CheckpointId]*CheckpointProof
+	lastStableCheckpoint      *CheckpointProof
+	state                     *State
+	requests                  map[int64][]*pb.ClientRequest
+	lastAppliedSequenceNumber int64
+	committedRequests         map[int64][]*pb.ClientRequest
 }
 
 func NewStore(config *Config) *Store {
 	return &Store{
-		config:               config,
-		unstableCheckpoints:  make(map[CheckpointId]*CheckpointProof),
-		lastStableCheckpoint: nil,
-		state:                &State{value: make(map[string]int)},
-		requests:             make(map[int64][]*pb.ClientRequest),
+		config:                    config,
+		unstableCheckpoints:       make(map[CheckpointId]*CheckpointProof),
+		lastStableCheckpoint:      nil,
+		lastAppliedSequenceNumber: 0,
+		committedRequests:         make(map[int64][]*pb.ClientRequest),
+		state:                     &State{value: make(map[string]int)},
+		requests:                  make(map[int64][]*pb.ClientRequest),
 	}
 }
 
@@ -59,6 +63,10 @@ func (s *Store) GetLastStableCheckpoint() []*pb.CheckpointRequest {
 	}
 
 	return s.lastStableCheckpoint.proof
+}
+
+func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointRequest) {
+	s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
 }
 
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
@@ -89,30 +97,35 @@ func (s *Store) AddRequests(sequenceNumber int64, reqs []*pb.ClientRequest) {
 	s.requests[sequenceNumber] = reqs
 }
 
-func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.OperationResult, *pb.CheckpointRequest) {
-	// TODO: add when all to this point has been committed
+func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.OperationResult, []*pb.CheckpointRequest) {
 	log.WithField("request", commit.String()).Debug("committing request")
 
-	reqs := s.requests[commit.SequenceNumber]
+	s.committedRequests[commit.SequenceNumber] = s.requests[commit.SequenceNumber]
 
-	results := make([]*pb.OperationResult, len(reqs))
-	if commit.RequestDigest != "nil" {
-		for i, req := range reqs {
-			results[i] = s.state.apply(req.Operation)
+	var reqs []*pb.ClientRequest
+	var results []*pb.OperationResult
+	var checkpoints []*pb.CheckpointRequest
+
+	for ; s.committedRequests[s.lastAppliedSequenceNumber+1] != nil; s.lastAppliedSequenceNumber++ {
+		reqs = append(reqs, s.requests[s.lastAppliedSequenceNumber+1]...)
+
+		if commit.RequestDigest != "nil" {
+			for _, req := range s.requests[s.lastAppliedSequenceNumber+1] {
+				results = append(results, s.state.apply(req.Operation))
+			}
+		}
+
+		if int(commit.SequenceNumber)%s.config.General.CheckpointInterval == 0 {
+			log.WithField("seq-no", commit.SequenceNumber).Error("created checkpoint for seq-no")
+			checkpoints = append(checkpoints, &pb.CheckpointRequest{
+				SequenceNumber: commit.SequenceNumber,
+				StateDigest:    []byte(s.state.Digest()),
+				ReplicaId:      s.config.Id,
+			})
 		}
 	}
 
-	var checkpoint *pb.CheckpointRequest
-	if int(commit.SequenceNumber)%s.config.General.CheckpointInterval == 0 {
-		log.WithField("seq-no", commit.SequenceNumber).Error("created checkpoint for seq-no")
-		checkpoint = &pb.CheckpointRequest{
-			SequenceNumber: commit.SequenceNumber,
-			StateDigest:    []byte(s.state.Digest()),
-			ReplicaId:      s.config.Id,
-		}
-	}
-
-	return reqs, results, checkpoint
+	return reqs, results, checkpoints
 }
 
 func (s *State) Digest() string {
@@ -135,6 +148,22 @@ func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
 		if seqNo <= checkpoint.proof[0].SequenceNumber {
 			delete(s.requests, seqNo)
 		}
+	}
+
+	// remove unapplied requests
+	haveStaleState := false
+	for seqNo := range s.committedRequests {
+		if seqNo <= checkpoint.proof[0].SequenceNumber {
+			delete(s.committedRequests, seqNo)
+			haveStaleState = true
+		}
+	}
+
+	if haveStaleState {
+		s.state = &State{value: make(map[string]int)}
+		// In reality this should be a call to other services to update missing requests
+		// Since it can be done outside the critical path, we can ignore it here
+		s.state.apply(&pb.Operation{Type: pb.Operation_ADD, Key: "", Value: string(checkpoint.proof[0].StateDigest)})
 	}
 }
 

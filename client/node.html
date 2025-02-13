@@ -36,7 +36,7 @@
       function onSubClick() {
         $.post("/sub", { value: $("#subValue").val() }).done(refreshState);
       }
-      setInterval(refreshState, 10000);
+      setInterval(refreshState, 1000000);
       refreshState();
     </script>
   </head>

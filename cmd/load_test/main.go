@@ -5,10 +5,12 @@ import (
 	"github.com/Arman17Babaei/pbft/load_tester"
 	config2 "github.com/Arman17Babaei/pbft/load_tester/config"
 	log "github.com/sirupsen/logrus"
+	"os"
 )
 
 func main() {
 	log.SetLevel(log.ErrorLevel)
+	log.SetOutput(os.Stdout)
 	var loadTesterConfig config2.Config
 	err := config.LoadConfig(&loadTesterConfig, "load_tester")
 	if err != nil {

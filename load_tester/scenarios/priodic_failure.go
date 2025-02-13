@@ -9,6 +9,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"sort"
 	"time"
 )
 
@@ -37,18 +38,25 @@ func (p *PeriodicFailure) Run(stopCh <-chan any) {
 	for id := range p.nodes {
 		nodeIds = append(nodeIds, id)
 	}
+	sort.Strings(nodeIds)
 
 	toggleTicker := time.NewTicker(p.interval)
 	curIdx := len(nodeIds) - 1
+	isEnableTurn := false
 	for {
 		select {
 		case <-stopCh:
 			return
 		case <-toggleTicker.C:
-			sendEnable(p.nodes[nodeIds[curIdx]])
-			curIdx = (curIdx + 1) % len(nodeIds)
-			log.WithField("node id", nodeIds[curIdx]).Error("Disabling")
-			sendDisable(p.nodes[nodeIds[curIdx]])
+			if isEnableTurn {
+				log.WithField("node id", nodeIds[curIdx]).Error("Enabling")
+				sendEnable(p.nodes[nodeIds[curIdx]])
+			} else {
+				curIdx = (curIdx + 1) % len(nodeIds)
+				log.WithField("node id", nodeIds[curIdx]).Error("Disabling")
+				sendDisable(p.nodes[nodeIds[curIdx]])
+			}
+			isEnableTurn = !isEnableTurn
 		}
 	}
 }

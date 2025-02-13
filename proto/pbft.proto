@@ -57,6 +57,7 @@ message CheckpointRequest {
     int64 sequence_number = 1;  // Sequence number for the checkpoint
     bytes state_digest = 2;      // Digest of the state at the checkpoint
     string replica_id = 3;        // Identifier of the replica that sent the checkpoint
+    int64 view_id = 4;          // View identifier
 }
 
 // View change message
@@ -78,6 +79,15 @@ message NewViewRequest {
     repeated ViewChangeRequest view_change_proof = 2;
     repeated PrePrepareRequest preprepares = 3;
     string replica_id = 4;       // Identifier of the replica that sent the new view
+}
+
+message StatusRequest {
+    string replica_id = 1;       // Identifier of the replica that sent the status request
+}
+
+message StatusResponse {
+    int64 last_stable_sequence_number = 1; // Last stable checkpoint
+    repeated CheckpointRequest checkpoint_proof = 2;
 }
 
 // gRPC service definition
@@ -102,6 +112,12 @@ service Pbft {
 
     // Send a NewView message
     rpc NewView(NewViewRequest) returns (Empty);
+
+    // Request latest status
+    rpc GetStatus(StatusRequest) returns (Empty);
+
+    // Send latest status
+    rpc Status(StatusResponse) returns (Empty);
 
     // Enable node
     rpc Enable(Empty) returns (Empty);
