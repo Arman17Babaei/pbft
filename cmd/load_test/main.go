@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	log.SetLevel(log.ErrorLevel)
+	log.SetLevel(log.WarnLevel)
 	log.SetOutput(os.Stdout)
 	var loadTesterConfig config2.Config
 	err := config.LoadConfig(&loadTesterConfig, "load_tester")

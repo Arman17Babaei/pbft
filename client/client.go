@@ -156,7 +156,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 
 	_, err = leaderClient.Request(ctx, clientRequest)
 	if err != nil {
-		log.WithError(err).Warn("error sending request to leader")
+		log.WithError(err).Info("error sending request to leader")
 		return err
 	}
 

@@ -169,7 +169,7 @@ func (n *Node) handleInput(input proto.Message) {
 
 func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
 	if !n.isPrimary() {
-		log.WithField("request", msgs[0].String()).Warn("Received client request but not primary")
+		log.WithField("request", msgs[0].String()).Info("Received client request but not primary")
 		log.WithField("my-id", n.Config.Id).WithField("leader", n.LeaderId).Info("Forwarding request to leader")
 		for _, msg := range msgs {
 			n.Sender.SendRPCToPeer(n.LeaderId, "Request", msg)
@@ -425,13 +425,8 @@ func (n *Node) goToViewChange() {
 
 	if n.LeaderId == n.Config.Id {
 		n.handleViewChangeRequest(viewChangeRequest)
-	} else {
-		n.Sender.SendRPCToPeer(
-			n.LeaderId,
-			"ViewChange",
-			viewChangeRequest,
-		)
 	}
+	n.Sender.Broadcast("ViewChange", viewChangeRequest)
 }
 
 func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
@@ -456,6 +451,8 @@ func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
 	if len(n.ViewChanges[msg.NewViewId]) == 2*n.Config.F()+1 {
 		minSeq := n.Store.GetLastStableSequenceNumber()
 		maxSeq := int64(0)
+
+		// Determine minSeq and maxSeq from all ViewChange messages
 		for _, viewChange := range n.ViewChanges[msg.NewViewId] {
 			if viewChange.LastStableSequenceNumber < minSeq {
 				minSeq = viewChange.LastStableSequenceNumber
@@ -463,37 +460,76 @@ func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
 			if viewChange.LastStableSequenceNumber > maxSeq {
 				maxSeq = viewChange.LastStableSequenceNumber
 			}
-		}
-
-		preprepares := make([]*pb.PrePrepareRequest, maxSeq-minSeq)
-		for seqNo := minSeq + 1; seqNo < maxSeq; seqNo++ {
-			if preprepare, ok := n.Preprepares[int64(seqNo)]; ok {
-				preprepares[seqNo-minSeq] = preprepare
-			} else {
-				preprepares[seqNo-minSeq] = &pb.PrePrepareRequest{
-					ViewId:         msg.NewViewId - 1,
-					SequenceNumber: seqNo,
-					RequestDigest:  "nil",
+			for _, preparedProof := range viewChange.PreparedProof {
+				if preparedProof.PrePrepareRequest.SequenceNumber > maxSeq {
+					maxSeq = preparedProof.PrePrepareRequest.SequenceNumber
 				}
 			}
 		}
 
-		viewChangeMessages := make([]*pb.ViewChangeRequest, 0, 2*n.Config.F())
+		// Aggregate highest prepared certificates from all ViewChange messages
+		highestPrepares := make(map[int64]*pb.PrePrepareRequest)
 		for _, viewChange := range n.ViewChanges[msg.NewViewId] {
-			viewChangeMessages = append(viewChangeMessages, viewChange)
+			for _, preparedProof := range viewChange.PreparedProof {
+				prePrepare := preparedProof.PrePrepareRequest
+				seqNo := prePrepare.SequenceNumber
+
+				if seqNo < minSeq+1 || seqNo > maxSeq {
+					continue
+				}
+
+				// Validate Prepare messages count
+				replicaIDs := make(map[string]struct{})
+				for _, prepare := range preparedProof.PreparedMessages {
+					if prepare.SequenceNumber == seqNo && prepare.RequestDigest == prePrepare.RequestDigest {
+						replicaIDs[prepare.ReplicaId] = struct{}{}
+					}
+				}
+				if len(replicaIDs) < 2*n.Config.F() {
+					continue
+				}
+
+				// Update highest view PrePrepare for this sequence number
+				if current, exists := highestPrepares[seqNo]; !exists || prePrepare.ViewId > current.ViewId {
+					highestPrepares[seqNo] = prePrepare
+				}
+			}
 		}
 
+		// Generate new PrePrepares for the new view
+		preprepares := make([]*pb.PrePrepareRequest, 0)
+		for seqNo := minSeq + 1; seqNo <= maxSeq; seqNo++ {
+			var digest string
+			if prePrepare, exists := highestPrepares[seqNo]; exists {
+				digest = prePrepare.RequestDigest
+			} else {
+				digest = "nil"
+			}
+
+			preprepares = append(preprepares, &pb.PrePrepareRequest{
+				ViewId:         msg.NewViewId,
+				SequenceNumber: seqNo,
+				RequestDigest:  digest,
+			})
+		}
+
+		// Collect view change proofs
+		viewChangeMessages := make([]*pb.ViewChangeRequest, 0, len(n.ViewChanges[msg.NewViewId]))
+		for _, vc := range n.ViewChanges[msg.NewViewId] {
+			viewChangeMessages = append(viewChangeMessages, vc)
+		}
+
+		// Broadcast NewView message
 		newViewMessage := &pb.NewViewRequest{
 			NewViewId:       msg.NewViewId,
 			ViewChangeProof: viewChangeMessages,
 			Preprepares:     preprepares,
 			ReplicaId:       n.Config.Id,
 		}
-
 		n.Sender.Broadcast("NewView", newViewMessage)
 		log.WithField("my-id", n.Config.Id).Error("broadcasted new view message")
 
-		// Make myself leader
+		// Update node state
 		n.IsInViewChange = false
 		n.CurrentView = msg.NewViewId
 		n.LeaderId = n.Config.Id
@@ -554,7 +590,7 @@ func (n *Node) handleStatusResponse(msg *pb.StatusResponse) {
 	log.WithField("request", msg.String()).Info("Received status response")
 
 	if !n.verifyStatusResponse(msg) {
-		log.WithField("request", msg.String()).Warn("Failed to verify status response")
+		log.WithField("request", msg.String()).Info("Failed to verify status response")
 		return
 	}
 

@@ -128,7 +128,7 @@ func (s *Sender) sendRPCToPeer(client pb.PbftClient, method string, message prot
 	switch method {
 	case "Request":
 		if _, err := client.Request(ctx, message.(*pb.ClientRequest)); err != nil {
-			log.WithError(err).Error("failed to send Request")
+			log.WithError(err).Info("failed to send Request")
 			return false
 		}
 	case "PrePrepare":
