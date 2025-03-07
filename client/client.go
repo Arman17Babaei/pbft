@@ -19,6 +19,7 @@ type Client struct {
 	mu        sync.Mutex
 	config    *Config
 	nodeNames []string
+	nodeConns map[string]pb.PbftClient
 
 	listener          net.Listener
 	grpcServer        *grpc.Server
@@ -88,6 +89,7 @@ func (rc *ResponseCollection) GetResponse() *pb.ClientResponse {
 func NewClient(config *Config) *Client {
 	client := &Client{
 		config:            config,
+		nodeConns:         make(map[string]pb.PbftClient),
 		collectedResponse: make(map[int64]*ResponseCollection),
 		callbackChannels:  make(map[int64]chan<- *pb.OperationResult),
 	}
@@ -112,6 +114,16 @@ func NewClient(config *Config) *Client {
 
 	client.currentLeader = client.nodeNames[rand.Intn(len(client.nodeNames))]
 
+	for id, node := range config.NodesAddress {
+		target := fmt.Sprintf("%s:%d", node.Host, node.Port)
+		conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.WithError(err).WithField("target", target).Error("error creating pbft client")
+		}
+
+		client.nodeConns[id] = pb.NewPbftClient(conn)
+	}
+
 	return client
 }
 
@@ -127,19 +139,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 	//c.mu.Lock()
 	//defer c.mu.Unlock()
 
-	leader := c.config.NodesAddress[c.currentLeader]
-	target := fmt.Sprintf("%s:%d", leader.Host, leader.Port)
-	conn, err := grpc.NewClient(
-		target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		log.WithError(err).WithField("target", target).Error("error creating pbft client")
-	}
-	defer conn.Close()
-
-	// Send request to the leader
-	leaderClient := pb.NewPbftClient(conn)
+	leaderClient := c.nodeConns[c.currentLeader]
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.config.GrpcTimeoutMs)*time.Millisecond)
 	defer cancel()
@@ -154,7 +154,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 
 	c.callbackChannels[timestamp] = callback
 
-	_, err = leaderClient.Request(ctx, clientRequest)
+	_, err := leaderClient.Request(ctx, clientRequest)
 	if err != nil {
 		log.WithError(err).Info("error sending request to leader")
 		return err

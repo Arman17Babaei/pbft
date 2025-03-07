@@ -83,7 +83,7 @@ func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
 	}
 
 	s.unstableCheckpoints[id].proof = append(s.unstableCheckpoints[id].proof, checkpoint)
-	if len(s.unstableCheckpoints[id].proof) > 2*s.config.F() {
+	if len(s.unstableCheckpoints[id].proof) == 2*s.config.F() {
 		sequenceNumber := &s.unstableCheckpoints[id].proof[0].SequenceNumber
 		s.stabilizeCheckpoint(s.unstableCheckpoints[id])
 		return sequenceNumber
@@ -107,18 +107,17 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 	var checkpoints []*pb.CheckpointRequest
 
 	for ; s.committedRequests[s.lastAppliedSequenceNumber+1] != nil; s.lastAppliedSequenceNumber++ {
-		reqs = append(reqs, s.requests[s.lastAppliedSequenceNumber+1]...)
+		requests := s.requests[s.lastAppliedSequenceNumber+1]
+		reqs = append(reqs, requests...)
 
-		if commit.RequestDigest != "nil" {
-			for _, req := range s.requests[s.lastAppliedSequenceNumber+1] {
-				results = append(results, s.state.apply(req.Operation))
-			}
+		for _, req := range requests {
+			results = append(results, s.state.apply(req.Operation))
 		}
 
-		if int(commit.SequenceNumber)%s.config.General.CheckpointInterval == 0 {
-			log.WithField("seq-no", commit.SequenceNumber).Error("created checkpoint for seq-no")
+		if int(s.lastAppliedSequenceNumber+1)%s.config.General.CheckpointInterval == 0 {
+			log.WithField("seq-no", s.lastAppliedSequenceNumber+1).Error("created checkpoint for seq-no")
 			checkpoints = append(checkpoints, &pb.CheckpointRequest{
-				SequenceNumber: commit.SequenceNumber,
+				SequenceNumber: s.lastAppliedSequenceNumber + 1,
 				StateDigest:    []byte(s.state.Digest()),
 				ReplicaId:      s.config.Id,
 			})

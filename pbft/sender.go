@@ -65,14 +65,14 @@ func (s *Sender) Broadcast(method string, message proto.Message) {
 }
 
 func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Message) {
-	_ = s.pool.Submit(func() {
+	go func() {
 		for i := 0; i < s.maxRetries; i++ {
 			if s.sendRPCToPeer(s.pbftClients[peerID], method, message) {
 				log.WithField("method", method).WithField("peer", peerID).Debug("message sent")
 				return
 			}
 		}
-	})
+	}()
 }
 
 func (s *Sender) SendRPCToClient(clientAddress, method string, message proto.Message) {

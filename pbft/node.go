@@ -1,5 +1,7 @@
 package pbft
 
+//go:generate mockgen -source=node.go -destination=node_mock.go -package=pbft
+
 import (
 	"time"
 
@@ -8,9 +10,15 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type ISender interface {
+	SendRPCToClient(clientAddress, method string, message proto.Message)
+	SendRPCToPeer(peerID string, method string, message proto.Message)
+	Broadcast(method string, message proto.Message)
+}
+
 type Node struct {
 	Config    *Config
-	Sender    *Sender
+	Sender    ISender
 	Store     *Store
 	InputCh   <-chan proto.Message
 	RequestCh <-chan *pb.ClientRequest
@@ -36,11 +44,12 @@ type Node struct {
 	Enabled   bool
 	EnableCh  <-chan any
 	DisableCh <-chan any
+	StopCh    chan any
 }
 
 func NewNode(
 	config *Config,
-	sender *Sender,
+	sender ISender,
 	inputCh <-chan proto.Message,
 	requestCh <-chan *pb.ClientRequest,
 	enableCh <-chan any,
@@ -73,6 +82,7 @@ func NewNode(
 		Enabled:   config.General.EnabledByDefault,
 		EnableCh:  enableCh,
 		DisableCh: disableCh,
+		StopCh:    make(chan any),
 	}
 }
 
@@ -80,8 +90,6 @@ func (n *Node) Run() {
 	n.ViewChangeTimer = time.NewTimer(time.Second)
 	n.ViewChangeTimer.Stop()
 
-	clientRequestTicker := time.NewTicker(100 * time.Millisecond)
-	var requestBatch []*pb.ClientRequest
 	n.Sender.Broadcast("GetStatus", &pb.StatusRequest{ReplicaId: n.Config.Id})
 	for {
 		if !n.Enabled {
@@ -93,24 +101,16 @@ func (n *Node) Run() {
 
 		select {
 		case request := <-n.RequestCh:
-			if len(requestBatch) > 400 {
-				log.Error("Ignoring request, batch is full")
-				continue
-			}
-			requestBatch = append(requestBatch, request)
+			n.handleClientRequest(request)
 		case input := <-n.InputCh:
 			n.handleInput(input)
 		case <-n.ViewChangeTimer.C:
 			n.goToViewChange()
-		case <-clientRequestTicker.C:
-			if len(requestBatch) == 0 {
-				continue
-			}
-			n.handleClientRequest(requestBatch)
-			requestBatch = []*pb.ClientRequest{}
 		case <-n.DisableCh:
 			n.Enabled = false
 			exhaustChannel(n.EnableCh)
+		case <-n.StopCh:
+			return
 		}
 	}
 }
@@ -126,6 +126,9 @@ func exhaustChannel[T any](channel <-chan T) {
 	}
 }
 
+func (n *Node) Stop() {
+	close(n.StopCh)
+}
 func (n *Node) isPrimary() bool {
 	return n.Config.Id == n.LeaderId
 }
@@ -167,14 +170,11 @@ func (n *Node) handleInput(input proto.Message) {
 	}
 }
 
-func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
+func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 	if !n.isPrimary() {
-		log.WithField("request", msgs[0].String()).Info("Received client request but not primary")
+		log.WithField("request", msg.String()).Info("Received client request but not primary")
 		log.WithField("my-id", n.Config.Id).WithField("leader", n.LeaderId).Info("Forwarding request to leader")
-		for _, msg := range msgs {
-			n.Sender.SendRPCToPeer(n.LeaderId, "Request", msg)
-		}
-
+		n.Sender.SendRPCToPeer(n.LeaderId, "Request", msg)
 		return
 	}
 
@@ -186,11 +186,11 @@ func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
 		return
 	}
 
-	log.WithField("request", msgs[0].String()).Info("Received client request")
+	log.WithField("request", msg.String()).Info("Received client request")
 
 	if len(n.InProgressRequests) >= n.Config.General.MaxOutstandingRequests {
 		log.Warn("Too many outstanding requests, putting request in pending queue")
-		n.PendingRequests = append(n.PendingRequests, msgs...)
+		n.PendingRequests = append(n.PendingRequests, msg)
 		return
 	}
 
@@ -201,13 +201,12 @@ func (n *Node) handleClientRequest(msgs []*pb.ClientRequest) {
 			ViewId:         n.CurrentView,
 			SequenceNumber: n.LastSequenceNumber,
 		},
-		Requests: msgs,
+		Requests: []*pb.ClientRequest{msg},
 	}
 	n.Preprepares[n.LastSequenceNumber] = prepreareMessage.PrePrepareRequest
 
-	n.Store.AddRequests(n.LastSequenceNumber, msgs)
+	n.Store.AddRequests(n.LastSequenceNumber, []*pb.ClientRequest{msg})
 	n.Sender.Broadcast("PrePrepare", prepreareMessage)
-
 }
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
@@ -275,7 +274,7 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 	n.Prepares[sequenceNumber][msg.ReplicaId] = msg
 
 	prepareNodes := make([]string, 0)
-	for id, _ := range n.Prepares[sequenceNumber] {
+	for id := range n.Prepares[sequenceNumber] {
 		prepareNodes = append(prepareNodes, id)
 	}
 	log.WithField("prepare-nodes", prepareNodes).Info("prepare nodes")
@@ -318,7 +317,7 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 	n.Commits[sequenceNumber][msg.ReplicaId] = msg
 
 	committeds := make([]string, 0)
-	for id, _ := range n.Commits[sequenceNumber] {
+	for id := range n.Commits[sequenceNumber] {
 		committeds = append(committeds, id)
 	}
 	log.WithField("committed-nodes", committeds).Info("committed nodes")
@@ -347,8 +346,11 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 		}
 
 		if len(n.InProgressRequests) < n.Config.General.MaxOutstandingRequests && len(n.PendingRequests) > 0 {
-			n.handleClientRequest(n.PendingRequests)
+			pendings := n.PendingRequests
 			n.PendingRequests = []*pb.ClientRequest{}
+			for _, pending := range pendings {
+				n.handleClientRequest(pending)
+			}
 		}
 	}
 }
