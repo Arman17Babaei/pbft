@@ -1,10 +1,12 @@
 package pbft
 
 import (
+	"fmt"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/proto"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -246,12 +248,92 @@ func TestNode_Run(t *testing.T) {
 
 		assert.Equal(t, checkpointInterval, int(node.Store.GetLastStableSequenceNumber()))
 	})
+
+	t.Run("stabilizing many checkpoints", func(t *testing.T) {
+		activeNodes := []string{"node_1", "node_2", "node_3"}
+		numCheckpoints := 100
+		numTransactions := numCheckpoints * checkpointInterval
+
+		sender := NewMockISender(ctrl)
+		inputCh, _, _, _, node := NewMockNode(sender, config)
+		node.LeaderId = "" // no-one is leader
+		sender.EXPECT().Broadcast("GetStatus", gomock.Any()).Times(1)
+		sender.EXPECT().Broadcast("Prepare", gomock.Any()).Times(numTransactions)
+		sender.EXPECT().Broadcast("Commit", gomock.Any()).Times(numTransactions)
+		sender.EXPECT().SendRPCToClient(gomock.Any(), "Response", gomock.Any()).Times(numTransactions)
+		sender.EXPECT().Broadcast("Checkpoint", gomock.Any()).Times(numCheckpoints)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			node.Run()
+			wg.Done()
+		}()
+
+		messages := make([]proto.Message, 0, 7*numTransactions+numCheckpoints)
+		var mu sync.Mutex
+		var messagesWg sync.WaitGroup
+		messagesString := make([]string, 0, 7*numTransactions+numCheckpoints)
+		for i := range numTransactions {
+			txnId := i + 1
+			messagesWg.Add(1)
+			go func(txnId int) {
+				time.Sleep(1 * time.Millisecond)
+				mu.Lock()
+				messages = append(messages, preprpareRequest(txnId))
+				messagesString = append(messagesString, fmt.Sprintf("preprpareRequest(%d)", txnId))
+				mu.Unlock()
+				for _, id := range activeNodes {
+					messagesWg.Add(1)
+					go func() {
+						time.Sleep(1 * time.Millisecond)
+						mu.Lock()
+						messages = append(messages, newPrepare(id, txnId))
+						messagesString = append(messagesString, fmt.Sprintf("newPrepare(\"%s\", %d)", id, txnId))
+						mu.Unlock()
+
+						time.Sleep(1 * time.Millisecond)
+						mu.Lock()
+						messages = append(messages, newCommit(id, txnId))
+						messagesString = append(messagesString, fmt.Sprintf("newCommit(\"%s\", %d)", id, txnId))
+						mu.Unlock()
+
+						if txnId%checkpointInterval == 0 {
+							time.Sleep(1 * time.Millisecond)
+							mu.Lock()
+							messages = append(messages, newCheckpoint(id, txnId))
+							messagesString = append(messagesString, fmt.Sprintf("newCheckpoint(\"%s\", %d)", id, txnId))
+							mu.Unlock()
+						}
+
+						messagesWg.Done()
+					}()
+				}
+
+				messagesWg.Done()
+			}(txnId)
+			time.Sleep(1 * time.Millisecond)
+		}
+		messagesWg.Wait()
+
+		for _, message := range messages {
+			inputCh <- message
+		}
+
+		time.Sleep(20 * time.Millisecond)
+		node.Stop()
+		wg.Wait()
+
+		fmt.Println(strings.Join(messagesString, ", "))
+
+		assert.Equal(t, numTransactions, int(node.Store.GetLastStableSequenceNumber()))
+	})
 }
 
 func newCheckpoint(id string, seqNo int) *pb.CheckpointRequest {
 	return &pb.CheckpointRequest{
 		SequenceNumber: int64(seqNo),
-		StateDigest:    nil,
+		StateDigest:    []byte("0"),
 		ReplicaId:      id,
 		ViewId:         0,
 	}

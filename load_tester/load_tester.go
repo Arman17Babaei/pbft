@@ -9,7 +9,8 @@ import (
 	"github.com/Arman17Babaei/pbft/pbft"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
-	"google.golang.org/protobuf/proto"
+	"os"
+	"os/exec"
 	"time"
 )
 
@@ -17,7 +18,6 @@ type LoadTest struct {
 	config     *loadtestconfig.Config
 	pbftConfig *pbft.Config
 	clients    []*client.Client
-	nodes      []*pbft.Node
 }
 
 func NewLoadTest(c *loadtestconfig.Config) *LoadTest {
@@ -30,13 +30,14 @@ func NewLoadTest(c *loadtestconfig.Config) *LoadTest {
 	l.pbftConfig = &pbftConfig
 
 	log.Info("Running cluster")
-	for id, address := range pbftConfig.PeersAddress {
+	for id := range pbftConfig.PeersAddress {
 		log.WithField("node", id).Info("node configuration")
-		configCopy := pbftConfig
-		configCopy.Id = id
-		configCopy.Address = address
-		l.nodes = append(l.nodes, startNode(&configCopy))
+		err := startNode(id)
+		if err != nil {
+			log.WithError(err).Fatal("could not start node")
+		}
 	}
+	time.Sleep(5 * time.Second)
 
 	var clientConfig client.Config
 	err = loader.LoadConfig(&clientConfig, "client")
@@ -99,19 +100,14 @@ func (l *LoadTest) Run() {
 	fmt.Printf("Throughput: %f\n", float64(totalDone)/time.Since(startTime).Seconds())
 }
 
-func startNode(config *pbft.Config) *pbft.Node {
-	inputCh := make(chan proto.Message, 5)
-	requestCh := make(chan *pb.ClientRequest, 5)
-	enableCh := make(chan any)
-	disableCh := make(chan any)
-	service := pbft.NewService(inputCh, requestCh, enableCh, disableCh, config)
-	sender := pbft.NewSender(config)
-	node := pbft.NewNode(config, sender, inputCh, requestCh, enableCh, disableCh)
-
-	go node.Run()
-	go service.Serve()
-
-	return node
+func startNode(id string) error {
+	cmd := exec.Command(
+		"/home/arman-babaei/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.23.4.linux-amd64/bin/go",
+		"run", "/home/arman-babaei/sharif/distributed/pbft/cmd/node/main.go",
+		"--id", id)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Start()
 }
 
 func startClient(config *client.Config) *client.Client {

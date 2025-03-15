@@ -210,6 +210,8 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 }
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
+	//log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.Config.Id).Error("PrePrepare received")
+	time.Sleep(1 * time.Millisecond)
 	if n.isPrimary() {
 		log.WithField("request", msg.String()).WithField("my-id", n.Config.Id).Warn("Received pre-prepare request but is primary")
 		return
