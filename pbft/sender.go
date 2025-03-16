@@ -3,6 +3,7 @@ package pbft
 import (
 	"context"
 	"fmt"
+	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"sync"
 	"time"
 
@@ -24,7 +25,7 @@ type Sender struct {
 	pool        *ants.Pool
 }
 
-func NewSender(config *Config) *Sender {
+func NewSender(config *configs.Config) *Sender {
 	pool, err := ants.NewPool(config.Grpc.MaxConcurrentStreams, ants.WithPreAlloc(true))
 	if err != nil {
 		log.WithError(err).Fatal("failed to create pool")

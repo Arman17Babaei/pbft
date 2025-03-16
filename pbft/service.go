@@ -3,6 +3,8 @@ package pbft
 import (
 	"context"
 	"fmt"
+	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"net"
 
 	log "github.com/sirupsen/logrus"
@@ -14,7 +16,7 @@ import (
 )
 
 type Service struct {
-	config     *Config
+	config     *configs.Config
 	inputCh    chan<- proto.Message
 	requestCh  chan<- *pb.ClientRequest
 	enableCh   chan<- any
@@ -27,7 +29,7 @@ type Service struct {
 	pb.UnimplementedPbftServer
 }
 
-func NewService(inputCh chan<- proto.Message, requestCh chan<- *pb.ClientRequest, enableCh chan<- any, disableCh chan<- any, config *Config) *Service {
+func NewService(inputCh chan<- proto.Message, requestCh chan<- *pb.ClientRequest, enableCh chan<- any, disableCh chan<- any, config *configs.Config) *Service {
 	service := &Service{
 		config:    config,
 		inputCh:   inputCh,
@@ -69,6 +71,7 @@ func (s *Service) Request(_ context.Context, req *pb.ClientRequest) (*pb.Empty, 
 		return nil, fmt.Errorf("request channel is full")
 	}
 
+	monitoring.MessageCounter.WithLabelValues(req.ClientId, s.config.Id, "request").Inc()
 	return &pb.Empty{}, nil
 }
 
@@ -79,6 +82,7 @@ func (s *Service) PrePrepare(_ context.Context, req *pb.PiggyBackedPrePareReques
 
 	log.WithField("my-id", s.config.Id).WithField("request", req).Info("pre-prepare request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues("leader", s.config.Id, "preprepare").Inc()
 
 	return &pb.Empty{}, nil
 }
@@ -90,6 +94,7 @@ func (s *Service) Prepare(_ context.Context, req *pb.PrepareRequest) (*pb.Empty,
 
 	log.WithField("my-id", s.config.Id).WithField("request", req).Info("prepare request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "prepare").Inc()
 
 	return &pb.Empty{}, nil
 }
@@ -101,6 +106,7 @@ func (s *Service) Commit(_ context.Context, req *pb.CommitRequest) (*pb.Empty, e
 
 	log.WithField("my-id", s.config.Id).WithField("request", req).Info("commit request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "commit").Inc()
 
 	return &pb.Empty{}, nil
 }
@@ -112,6 +118,7 @@ func (s *Service) Checkpoint(_ context.Context, req *pb.CheckpointRequest) (*pb.
 
 	log.WithField("my-id", s.config.Id).WithField("request", req).Info("checkpoint request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "checkpoint").Inc()
 
 	return &pb.Empty{}, nil
 }
@@ -123,6 +130,7 @@ func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.
 
 	log.WithField("my-id", s.config.Id).WithField("niew-view", req.GetNewViewId()).Info("view-change request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "view-change").Inc()
 
 	return &pb.Empty{}, nil
 }
@@ -134,6 +142,7 @@ func (s *Service) NewView(_ context.Context, req *pb.NewViewRequest) (*pb.Empty,
 
 	log.WithField("my-id", s.config.Id).WithField("new-view-id", req.NewViewId).WithField("leader-id", req.ReplicaId).Info("new-view request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "new-view").Inc()
 
 	return &pb.Empty{}, nil
 }
@@ -145,6 +154,8 @@ func (s *Service) GetStatus(_ context.Context, req *pb.StatusRequest) (*pb.Empty
 
 	log.WithField("my-id", s.config.Id).Info("checkpoint request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "get-status").Inc()
+
 	return &pb.Empty{}, nil
 }
 
@@ -155,6 +166,8 @@ func (s *Service) Status(_ context.Context, req *pb.StatusResponse) (*pb.Empty, 
 
 	log.WithField("my-id", s.config.Id).Info("status request received")
 	s.inputCh <- req
+	monitoring.MessageCounter.WithLabelValues("node", s.config.Id, "status").Inc()
+
 	return &pb.Empty{}, nil
 }
 
@@ -163,6 +176,7 @@ func (s *Service) Enable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
 	putOrIgnore[any](s.enableCh, req)
 
 	s.Enabled = true
+	monitoring.MessageCounter.WithLabelValues("load-test", s.config.Id, "enable").Inc()
 
 	return &pb.Empty{}, nil
 }
@@ -172,6 +186,7 @@ func (s *Service) Disable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
 	putOrIgnore[any](s.disableCh, req)
 
 	s.Enabled = false
+	monitoring.MessageCounter.WithLabelValues("load-test", s.config.Id, "disable").Inc()
 
 	return &pb.Empty{}, nil
 }

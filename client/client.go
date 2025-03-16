@@ -136,18 +136,18 @@ func (c *Client) Serve() {
 
 func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResult) error {
 	log.Debug("client.sendRequest")
-	//c.mu.Lock()
-	//defer c.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	leaderClient := c.nodeConns[c.currentLeader]
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.config.GrpcTimeoutMs)*time.Millisecond)
 	defer cancel()
 
-	timestamp := time.Now().UnixMilli()
+	timestamp := time.Now().UnixNano()
 	clientRequest := &pb.ClientRequest{
 		ClientId:    c.config.ClientId,
-		TimestampMs: timestamp,
+		TimestampNs: timestamp,
 		Operation:   op,
 		Callback:    c.callbackAddress,
 	}
@@ -156,7 +156,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 
 	_, err := leaderClient.Request(ctx, clientRequest)
 	if err != nil {
-		log.WithError(err).Info("error sending request to leader")
+		log.WithError(err).Error("error sending request to leader")
 		return err
 	}
 
@@ -171,14 +171,14 @@ func (c *Client) Response(_ context.Context, response *pb.ClientResponse) (*pb.E
 	defer c.mu.Unlock()
 
 	log.WithField("reponse", response.String()).Info("operation result received")
-	if _, ok := c.collectedResponse[response.TimestampMs]; !ok {
-		c.collectedResponse[response.TimestampMs] = NewResponseCollection()
+	if _, ok := c.collectedResponse[response.TimestampNs]; !ok {
+		c.collectedResponse[response.TimestampNs] = NewResponseCollection()
 	}
-	c.collectedResponse[response.TimestampMs].AddResponse(response)
+	c.collectedResponse[response.TimestampNs].AddResponse(response)
 
-	if c.collectedResponse[response.TimestampMs].GetSize(response.Result.Value) == c.config.F()+1 {
-		log.WithField("timestamp", response.TimestampMs).Info("request response ready")
-		c.callbackChannels[response.TimestampMs] <- c.collectedResponse[response.TimestampMs].GetResponse().Result
+	if c.collectedResponse[response.TimestampNs].GetSize(response.Result.Value) == c.config.F()+1 {
+		log.WithField("timestamp", response.TimestampNs).Info("request response ready")
+		c.callbackChannels[response.TimestampNs] <- c.collectedResponse[response.TimestampNs].GetResponse().Result
 	}
 
 	return &pb.Empty{}, nil

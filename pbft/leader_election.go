@@ -1,6 +1,7 @@
 package pbft
 
 import (
+	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"slices"
 )
 
@@ -12,7 +13,7 @@ type RoundRobinLeaderElection struct {
 	peerIds []string
 }
 
-func NewRoundRobinLeaderElection(config *Config) *RoundRobinLeaderElection {
+func NewRoundRobinLeaderElection(config *configs.Config) *RoundRobinLeaderElection {
 	leaderIds := make([]string, 0)
 	for id := range config.PeersAddress {
 		leaderIds = append(leaderIds, id)

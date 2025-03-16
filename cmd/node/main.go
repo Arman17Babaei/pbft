@@ -3,6 +3,8 @@ package main
 import (
 	"github.com/Arman17Babaei/pbft/config"
 	"github.com/Arman17Babaei/pbft/pbft"
+	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	"github.com/alecthomas/kong"
 	log "github.com/sirupsen/logrus"
@@ -15,11 +17,11 @@ type CLI struct {
 }
 
 func main() {
-	log.SetLevel(log.WarnLevel)
+	log.SetLevel(log.ErrorLevel)
 	var cli CLI
 	kong.Parse(&cli)
 
-	var pbftConfig pbft.Config
+	var pbftConfig configs.Config
 	err := config.LoadConfig(&pbftConfig, "pbft")
 	if err != nil {
 		log.WithError(err).Fatal("could not load config")
@@ -52,7 +54,7 @@ func main() {
 	select {}
 }
 
-func startNode(config pbft.Config) {
+func startNode(config configs.Config) {
 	inputCh := make(chan proto.Message)
 	requestCh := make(chan *pb.ClientRequest)
 	enableCh := make(chan any)
@@ -63,4 +65,5 @@ func startNode(config pbft.Config) {
 
 	go node.Run()
 	go service.Serve()
+	go monitoring.ServeMetrics(&config)
 }

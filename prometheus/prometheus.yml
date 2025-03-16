@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s  # Default: scrape targets every 15 seconds
+
+scrape_configs:
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:7001', 'localhost:7002', 'localhost:7003', 'localhost:7004']
+  - job_name: 'client'
+    static_configs:
+      - targets: ['localhost:7101', 'localhost:7102', 'localhost:7103', 'localhost:7104', 'localhost:7105', 'localhost:7106', 'localhost:7107', 'localhost:7108', 'localhost:7109', 'localhost:7110', 'localhost:7111', 'localhost:7112', 'localhost:7113', 'localhost:7114',  'localhost:7115', 'localhost:7116', 'localhost:7117', 'localhost:7118', 'localhost:7119', 'localhost:7120', 'localhost:7121', 'localhost:7122', 'localhost:7123', 'localhost:7124', 'localhost:7125', 'localhost:7126', 'localhost:7127', 'localhost:7128', 'localhost:7129', 'localhost:7130', 'localhost:7131', 'localhost:7132', 'localhost:7133', 'localhost:7134', 'localhost:7135', 'localhost:7136', 'localhost:7137', 'localhost:7138', 'localhost:7139', 'localhost:7140', 'localhost:7141', 'localhost:7142', 'localhost:7143', 'localhost:7144', 'localhost:7145', 'localhost:7146', 'localhost:7147', 'localhost:7148', 'localhost:7149', 'localhost:7150', 'localhost:7151', 'localhost:7152', 'localhost:7153', 'localhost:7154', 'localhost:7155', 'localhost:7156', 'localhost:7157', 'localhost:7158', 'localhost:7159', 'localhost:7160', 'localhost:7161', 'localhost:7162', 'localhost:7163', 'localhost:7164', 'localhost:7165', 'localhost:7166', 'localhost:7167', 'localhost:7168', 'localhost:7169', 'localhost:7170', 'localhost:7171', 'localhost:7172', 'localhost:7173', 'localhost:7174', 'localhost:7175', 'localhost:7176', 'localhost:7177', 'localhost:7178', 'localhost:7179', 'localhost:7180', 'localhost:7181', 'localhost:7182', 'localhost:7183', 'localhost:7184', 'localhost:7185', 'localhost:7186', 'localhost:7187', 'localhost:7188', 'localhost:7189', 'localhost:7190', 'localhost:7191', 'localhost:7192', 'localhost:7193', 'localhost:7194', 'localhost:7195', 'localhost:7196', 'localhost:7197']
+  - job_name: 'load_tester'
+    static_configs:
+      - targets: ['localhost:7201']

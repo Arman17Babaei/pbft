@@ -3,8 +3,8 @@ package scenarios
 import (
 	"context"
 	"fmt"
-	"github.com/Arman17Babaei/pbft/load_tester/config"
-	"github.com/Arman17Babaei/pbft/pbft"
+	"github.com/Arman17Babaei/pbft/load_tester/configs"
+	pbftconfig "github.com/Arman17Babaei/pbft/pbft/configs"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -14,12 +14,12 @@ import (
 )
 
 type PeriodicFailure struct {
-	peersAddress map[string]*pbft.Address
+	peersAddress map[string]*pbftconfig.Address
 	nodes        map[string]pb.PbftClient
 	interval     time.Duration
 }
 
-func (p *PeriodicFailure) PrepareScenario(loadTestConfig *config.Config, pbftConfig *pbft.Config) {
+func (p *PeriodicFailure) PrepareScenario(loadTestConfig *configs.Config, pbftConfig *pbftconfig.Config) {
 	p.peersAddress = pbftConfig.PeersAddress
 	p.interval = time.Duration(loadTestConfig.PeriodicFailure.IntervalSeconds) * time.Second
 	p.nodes = make(map[string]pb.PbftClient)

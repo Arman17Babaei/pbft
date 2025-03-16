@@ -3,6 +3,7 @@ package pbft
 //go:generate mockgen -source=node.go -destination=node_mock.go -package=pbft
 
 import (
+	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"time"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
@@ -17,7 +18,7 @@ type ISender interface {
 }
 
 type Node struct {
-	Config    *Config
+	Config    *configs.Config
 	Sender    ISender
 	Store     *Store
 	InputCh   <-chan proto.Message
@@ -30,9 +31,11 @@ type Node struct {
 	IsInViewChange  bool
 	ViewChanges     map[int64]map[string]*pb.ViewChangeRequest
 
-	Preprepares map[int64]*pb.PrePrepareRequest
-	Prepares    map[int64]map[string]*pb.PrepareRequest
-	Commits     map[int64]map[string]*pb.CommitRequest
+	Preprepares    map[int64]*pb.PrePrepareRequest
+	Prepares       map[int64]map[string]*pb.PrepareRequest
+	FailedPrepares map[int64]map[string]*pb.PrepareRequest
+	Commits        map[int64]map[string]*pb.CommitRequest
+	FailedCommits  map[int64]map[string]*pb.CommitRequest
 
 	PendingRequests    []*pb.ClientRequest
 	InProgressRequests map[int64]any
@@ -48,7 +51,7 @@ type Node struct {
 }
 
 func NewNode(
-	config *Config,
+	config *configs.Config,
 	sender ISender,
 	inputCh <-chan proto.Message,
 	requestCh <-chan *pb.ClientRequest,
@@ -69,9 +72,11 @@ func NewNode(
 		IsInViewChange: false,
 		ViewChanges:    make(map[int64]map[string]*pb.ViewChangeRequest),
 
-		Preprepares: make(map[int64]*pb.PrePrepareRequest),
-		Prepares:    make(map[int64]map[string]*pb.PrepareRequest),
-		Commits:     make(map[int64]map[string]*pb.CommitRequest),
+		Preprepares:    make(map[int64]*pb.PrePrepareRequest),
+		Prepares:       make(map[int64]map[string]*pb.PrepareRequest),
+		FailedPrepares: make(map[int64]map[string]*pb.PrepareRequest),
+		Commits:        make(map[int64]map[string]*pb.CommitRequest),
+		FailedCommits:  make(map[int64]map[string]*pb.CommitRequest),
 
 		PendingRequests:    []*pb.ClientRequest{},
 		InProgressRequests: make(map[int64]any),
@@ -211,7 +216,6 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 	//log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.Config.Id).Error("PrePrepare received")
-	time.Sleep(1 * time.Millisecond)
 	if n.isPrimary() {
 		log.WithField("request", msg.String()).WithField("my-id", n.Config.Id).Warn("Received pre-prepare request but is primary")
 		return
@@ -249,6 +253,13 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 
 	n.Store.AddRequests(msg.PrePrepareRequest.SequenceNumber, msg.Requests)
 	n.Sender.Broadcast("Prepare", prepareMessage)
+
+	for _, prepare := range n.FailedPrepares[sequenceNumber] {
+		n.handlePrepareRequest(prepare)
+	}
+	for _, commit := range n.FailedCommits[sequenceNumber] {
+		n.handleCommitRequest(commit)
+	}
 }
 
 func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
@@ -264,6 +275,12 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 
 	if !n.verifyPrepareRequest(msg) {
 		log.WithField("request", msg.String()).Warn("Failed to verify prepare request")
+
+		if _, ok := n.FailedPrepares[msg.SequenceNumber]; !ok {
+			n.FailedPrepares[msg.SequenceNumber] = make(map[string]*pb.PrepareRequest)
+		}
+
+		n.FailedPrepares[msg.SequenceNumber][msg.ReplicaId] = msg
 		return
 	}
 
@@ -308,6 +325,12 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 
 	if !n.verifyCommitRequest(msg) {
 		log.WithField("request", msg.String()).Warn("Failed to verify commit request")
+
+		if _, ok := n.FailedCommits[msg.SequenceNumber]; !ok {
+			n.FailedCommits[msg.SequenceNumber] = make(map[string]*pb.CommitRequest)
+		}
+
+		n.FailedCommits[msg.SequenceNumber][msg.ReplicaId] = msg
 		return
 	}
 
@@ -339,7 +362,7 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 		for i, req := range reqs {
 			reply := &pb.ClientResponse{
 				ViewId:      msg.ViewId,
-				TimestampMs: req.TimestampMs,
+				TimestampNs: req.TimestampNs,
 				ClientId:    req.ClientId,
 				ReplicaId:   n.Config.Id,
 				Result:      resps[i],

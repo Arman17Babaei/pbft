@@ -1,4 +1,4 @@
-package pbft
+package configs
 
 type Config struct {
 	Id           string              `mapstructure:"id"`

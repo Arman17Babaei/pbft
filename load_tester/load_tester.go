@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"github.com/Arman17Babaei/pbft/client"
 	loader "github.com/Arman17Babaei/pbft/config"
-	loadtestconfig "github.com/Arman17Babaei/pbft/load_tester/config"
+	loadtestconfig "github.com/Arman17Babaei/pbft/load_tester/configs"
 	"github.com/Arman17Babaei/pbft/load_tester/scenarios"
-	"github.com/Arman17Babaei/pbft/pbft"
+	"github.com/Arman17Babaei/pbft/pbft/configs"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
 	"os"
@@ -16,13 +16,25 @@ import (
 
 type LoadTest struct {
 	config     *loadtestconfig.Config
-	pbftConfig *pbft.Config
+	pbftConfig *configs.Config
 	clients    []*client.Client
+}
+
+type ClientResult struct {
+	Sent   int
+	Done   int
+	Failed int
+}
+
+func (r *ClientResult) Add(other ClientResult) {
+	r.Sent += other.Sent
+	r.Done += other.Done
+	r.Failed += other.Failed
 }
 
 func NewLoadTest(c *loadtestconfig.Config) *LoadTest {
 	l := &LoadTest{config: c}
-	var pbftConfig pbft.Config
+	var pbftConfig configs.Config
 	err := loader.LoadConfig(&pbftConfig, "pbft")
 	if err != nil {
 		log.WithError(err).Fatal("could not load config")
@@ -49,7 +61,7 @@ func NewLoadTest(c *loadtestconfig.Config) *LoadTest {
 		configCopy := clientConfig
 		configCopy.ClientId = fmt.Sprintf("client-%d", i)
 		configCopy.GrpcAddress.Host = "localhost"
-		configCopy.GrpcAddress.Port = 3000 + i
+		configCopy.GrpcAddress.Port = 3000 + i + 1
 		configCopy.HttpAddress = nil
 		l.clients = append(l.clients, startClient(&configCopy))
 	}
@@ -61,28 +73,36 @@ func (l *LoadTest) Run() {
 	intervalNs := int64(l.config.NumClients) * time.Second.Nanoseconds() / int64(l.config.Throughput)
 	intervalDuration := time.Duration(intervalNs) * time.Nanosecond
 	stopChannel := make(chan any)
-	resultChannels := make([]chan int, 0, len(l.clients))
+	resultChannels := make([]chan ClientResult, 0, len(l.clients))
 	scenario := scenarios.Scenarios[l.config.Scenario]
 	scenario.PrepareScenario(l.config, l.pbftConfig)
 	time.Sleep(time.Second)
 
 	go scenario.Run(stopChannel)
+
 	for _, c := range l.clients {
-		resultCh := make(chan int)
+		resultCh := make(chan ClientResult)
 		resultChannels = append(resultChannels, resultCh)
-		go func(stopCh chan any, resultCh chan int) {
+		go func(stopCh chan any, resultCh chan ClientResult) {
 			ticker := time.NewTicker(intervalDuration)
 			responseCh := make(chan *pb.OperationResult)
+			failed := 0
+			sent := 0
 			done := 0
 			for {
 				select {
 				case <-ticker.C:
 					op := &pb.Operation{Type: pb.Operation_GET}
-					_ = c.SendRequest(op, responseCh)
+					err := c.SendRequest(op, responseCh)
+					if err != nil {
+						failed++
+					} else {
+						sent++
+					}
 				case <-responseCh:
-					done += 1
+					done++
 				case <-stopCh:
-					resultCh <- done
+					resultCh <- ClientResult{Sent: sent, Done: done, Failed: failed}
 					break
 				}
 			}
@@ -91,13 +111,16 @@ func (l *LoadTest) Run() {
 	startTime := time.Now()
 	time.Sleep(time.Duration(l.config.DurationSeconds) * time.Second)
 	close(stopChannel)
-	totalDone := 0
+	totalResult := ClientResult{}
 	for _, ch := range resultChannels {
-		totalDone += <-ch
+		result := <-ch
+		totalResult.Add(result)
 	}
 
-	fmt.Printf("Total done: %d\n", totalDone)
-	fmt.Printf("Throughput: %f\n", float64(totalDone)/time.Since(startTime).Seconds())
+	fmt.Printf("Total sent: %d\n", totalResult.Sent)
+	fmt.Printf("Total failed: %d\n", totalResult.Failed)
+	fmt.Printf("Total done: %d\n", totalResult.Done)
+	fmt.Printf("Throughput: %f\n", float64(totalResult.Done)/time.Since(startTime).Seconds())
 }
 
 func startNode(id string) error {
@@ -112,8 +135,6 @@ func startNode(id string) error {
 
 func startClient(config *client.Config) *client.Client {
 	c := client.NewClient(config)
-	httpServer := client.NewHttpServer(config, c)
 	go c.Serve()
-	go httpServer.Serve()
 	return c
 }

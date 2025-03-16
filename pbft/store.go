@@ -1,6 +1,7 @@
 package pbft
 
 import (
+	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"slices"
 	"strconv"
 
@@ -22,7 +23,7 @@ type State struct {
 }
 
 type Store struct {
-	config                    *Config
+	config                    *configs.Config
 	unstableCheckpoints       map[CheckpointId]*CheckpointProof
 	lastStableCheckpoint      *CheckpointProof
 	state                     *State
@@ -31,7 +32,7 @@ type Store struct {
 	committedRequests         map[int64][]*pb.ClientRequest
 }
 
-func NewStore(config *Config) *Store {
+func NewStore(config *configs.Config) *Store {
 	return &Store{
 		config:                    config,
 		unstableCheckpoints:       make(map[CheckpointId]*CheckpointProof),

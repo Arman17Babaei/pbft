@@ -7,7 +7,7 @@ import "general.proto";
 
 message ClientResponse {
     int64 view_id = 1;          // View identifier
-    int64 timestamp_ms = 2;     // Unique identifier for the request
+    int64 timestamp_ns = 2;     // Unique identifier for the request
     string client_id = 3;       // Unique identifier for the client
     string replica_id = 4;       // Identifier of the replica that processed the request
     OperationResult result = 5; // Result of the operation

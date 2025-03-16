@@ -2,6 +2,7 @@ package pbft
 
 import (
 	"fmt"
+	"github.com/Arman17Babaei/pbft/pbft/configs"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
@@ -20,18 +21,18 @@ func TestNode_Run(t *testing.T) {
 	maxOutstandingRequests := 15
 	checkpointInterval := 5
 	waterMarkInterval := 20
-	config := &Config{
+	config := &configs.Config{
 		Id: "node_0",
-		PeersAddress: map[string]*Address{
+		PeersAddress: map[string]*configs.Address{
 			"node_0": {Host: "localhost", Port: 3000},
 			"node_1": {Host: "localhost", Port: 3001},
 			"node_2": {Host: "localhost", Port: 3002},
 			"node_3": {Host: "localhost", Port: 3003},
 		},
-		Timers: &Timers{
+		Timers: &configs.Timers{
 			ViewChangeTimeoutMs: int(viewChangeTimeout.Milliseconds()),
 		},
-		General: &General{
+		General: &configs.General{
 			EnabledByDefault:       true,
 			MaxOutstandingRequests: maxOutstandingRequests,
 			CheckpointInterval:     checkpointInterval,
@@ -373,13 +374,13 @@ func newPrepare(id string, seqNo int) *pb.PrepareRequest {
 func newRequest() *pb.ClientRequest {
 	return &pb.ClientRequest{
 		ClientId:    "client_id",
-		TimestampMs: time.Now().UnixMilli(),
+		TimestampNs: time.Now().UnixNano(),
 		Operation:   &pb.Operation{Type: pb.Operation_GET},
 		Callback:    "callback",
 	}
 }
 
-func NewMockNode(sender ISender, config *Config) (chan proto.Message, chan *pb.ClientRequest, chan any, chan any, *Node) {
+func NewMockNode(sender ISender, config *configs.Config) (chan proto.Message, chan *pb.ClientRequest, chan any, chan any, *Node) {
 	inputCh := make(chan proto.Message, 5)
 	requestCh := make(chan *pb.ClientRequest, 5)
 	enableCh := make(chan any)
