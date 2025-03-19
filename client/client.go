@@ -33,7 +33,7 @@ type Client struct {
 }
 
 type ResponseCollection struct {
-	mu         sync.RWMutex
+	rcmu       sync.RWMutex
 	collection map[string]map[string]*pb.ClientResponse
 }
 
@@ -44,8 +44,8 @@ func NewResponseCollection() *ResponseCollection {
 }
 
 func (rc *ResponseCollection) AddResponse(response *pb.ClientResponse) {
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
+	rc.rcmu.Lock()
+	defer rc.rcmu.Unlock()
 
 	if _, ok := rc.collection[response.Result.Value]; !ok {
 		rc.collection[response.Result.Value] = make(map[string]*pb.ClientResponse)
@@ -54,8 +54,8 @@ func (rc *ResponseCollection) AddResponse(response *pb.ClientResponse) {
 }
 
 func (rc *ResponseCollection) GetSize(_ string) int {
-	rc.mu.RLock()
-	defer rc.mu.RUnlock()
+	rc.rcmu.RLock()
+	defer rc.rcmu.RUnlock()
 
 	maxLen := 0
 	for _, responses := range rc.collection {
@@ -68,8 +68,8 @@ func (rc *ResponseCollection) GetSize(_ string) int {
 }
 
 func (rc *ResponseCollection) GetResponse() *pb.ClientResponse {
-	rc.mu.RLock()
-	defer rc.mu.RUnlock()
+	rc.rcmu.RLock()
+	defer rc.rcmu.RUnlock()
 
 	maxLen := 0
 	var response *pb.ClientResponse
@@ -137,9 +137,8 @@ func (c *Client) Serve() {
 func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResult) error {
 	log.Debug("client.sendRequest")
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	leaderClient := c.nodeConns[c.currentLeader]
+	c.currentLeader = c.nodeNames[rand.Intn(len(c.nodeNames))]
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.config.GrpcTimeoutMs)*time.Millisecond)
 	defer cancel()
@@ -153,6 +152,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 	}
 
 	c.callbackChannels[timestamp] = callback
+	c.mu.Unlock()
 
 	_, err := leaderClient.Request(ctx, clientRequest)
 	if err != nil {
@@ -161,24 +161,26 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 	}
 
 	log.WithField("leader", c.currentLeader).Info("request sent to leader")
-	c.currentLeader = c.nodeNames[rand.Intn(len(c.nodeNames))]
 	return nil
 }
 
 func (c *Client) Response(_ context.Context, response *pb.ClientResponse) (*pb.Empty, error) {
 	log.Debug("client.response")
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	log.WithField("reponse", response.String()).Info("operation result received")
+	c.mu.Lock()
 	if _, ok := c.collectedResponse[response.TimestampNs]; !ok {
 		c.collectedResponse[response.TimestampNs] = NewResponseCollection()
 	}
-	c.collectedResponse[response.TimestampNs].AddResponse(response)
 
-	if c.collectedResponse[response.TimestampNs].GetSize(response.Result.Value) == c.config.F()+1 {
+	responseCollection := c.collectedResponse[response.TimestampNs]
+	operationResults := c.callbackChannels[response.TimestampNs]
+	c.mu.Unlock()
+
+	responseCollection.AddResponse(response)
+
+	if responseCollection.GetSize(response.Result.Value) == c.config.F()+1 {
 		log.WithField("timestamp", response.TimestampNs).Info("request response ready")
-		c.callbackChannels[response.TimestampNs] <- c.collectedResponse[response.TimestampNs].GetResponse().Result
+		operationResults <- responseCollection.GetResponse().Result
 	}
 
 	return &pb.Empty{}, nil

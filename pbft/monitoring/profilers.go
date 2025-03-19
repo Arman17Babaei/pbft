@@ -11,3 +11,10 @@ var MessageCounter = promauto.NewCounterVec(
 	},
 	[]string{"from", "to", "type"},
 )
+
+var ExecutedRequestsGauge = promauto.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "executed_requests",
+	},
+	[]string{"node"},
+)

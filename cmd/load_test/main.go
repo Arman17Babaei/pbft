@@ -4,6 +4,7 @@ import (
 	"github.com/Arman17Babaei/pbft/config"
 	"github.com/Arman17Babaei/pbft/load_tester"
 	"github.com/Arman17Babaei/pbft/load_tester/configs"
+	"github.com/Arman17Babaei/pbft/load_tester/monitoring"
 	log "github.com/sirupsen/logrus"
 	"os"
 )
@@ -18,5 +19,6 @@ func main() {
 	}
 
 	loadTester := load_tester.NewLoadTest(&loadTesterConfig)
-	loadTester.Run()
+	go loadTester.Run()
+	monitoring.ServeMetrics()
 }

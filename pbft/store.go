@@ -2,6 +2,7 @@ package pbft
 
 import (
 	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"slices"
 	"strconv"
 
@@ -108,6 +109,7 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 	var results []*pb.OperationResult
 	var checkpoints []*pb.CheckpointRequest
 
+	monitoring.ExecutedRequestsGauge.WithLabelValues(s.config.Id).Set(float64(s.lastAppliedSequenceNumber))
 	for ; s.committedRequests[s.lastAppliedSequenceNumber+1] != nil; s.lastAppliedSequenceNumber++ {
 		requests := s.requests[s.lastAppliedSequenceNumber+1]
 		reqs = append(reqs, requests...)
@@ -166,6 +168,8 @@ func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
 		// Since it can be done outside the critical path, we can ignore it here
 		s.state.apply(&pb.Operation{Type: pb.Operation_ADD, Key: "", Value: string(checkpoint.proof[0].StateDigest)})
 	}
+
+	s.lastAppliedSequenceNumber = checkpoint.proof[0].SequenceNumber
 }
 
 func (s *State) apply(operation *pb.Operation) *pb.OperationResult {

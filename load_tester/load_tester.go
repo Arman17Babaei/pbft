@@ -5,12 +5,14 @@ import (
 	"github.com/Arman17Babaei/pbft/client"
 	loader "github.com/Arman17Babaei/pbft/config"
 	loadtestconfig "github.com/Arman17Babaei/pbft/load_tester/configs"
+	"github.com/Arman17Babaei/pbft/load_tester/monitoring"
 	"github.com/Arman17Babaei/pbft/load_tester/scenarios"
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -80,12 +82,12 @@ func (l *LoadTest) Run() {
 
 	go scenario.Run(stopChannel)
 
-	for _, c := range l.clients {
+	for i, c := range l.clients {
 		resultCh := make(chan ClientResult)
 		resultChannels = append(resultChannels, resultCh)
-		go func(stopCh chan any, resultCh chan ClientResult) {
+		go func(ind int, c *client.Client, stopCh chan any, resultCh chan ClientResult) {
 			ticker := time.NewTicker(intervalDuration)
-			responseCh := make(chan *pb.OperationResult)
+			responseCh := make(chan *pb.OperationResult, 10_000)
 			failed := 0
 			sent := 0
 			done := 0
@@ -95,18 +97,21 @@ func (l *LoadTest) Run() {
 					op := &pb.Operation{Type: pb.Operation_GET}
 					err := c.SendRequest(op, responseCh)
 					if err != nil {
+						monitoring.RequestCounter.WithLabelValues(strconv.Itoa(ind), err.Error()).Inc()
 						failed++
 					} else {
+						monitoring.RequestCounter.WithLabelValues(strconv.Itoa(ind), "sent").Inc()
 						sent++
 					}
 				case <-responseCh:
+					monitoring.RequestCounter.WithLabelValues(strconv.Itoa(ind), "repliedTo").Inc()
 					done++
 				case <-stopCh:
 					resultCh <- ClientResult{Sent: sent, Done: done, Failed: failed}
 					break
 				}
 			}
-		}(stopChannel, resultCh)
+		}(i, c, stopChannel, resultCh)
 	}
 	startTime := time.Now()
 	time.Sleep(time.Duration(l.config.DurationSeconds) * time.Second)
