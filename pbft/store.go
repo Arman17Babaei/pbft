@@ -70,6 +70,7 @@ func (s *Store) GetLastStableCheckpoint() []*pb.CheckpointRequest {
 
 func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointRequest) {
 	s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
+	s.lastAppliedSequenceNumber = checkpointProof[0].SequenceNumber
 }
 
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {

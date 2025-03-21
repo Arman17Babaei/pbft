@@ -653,6 +653,7 @@ func (n *Node) handleStatusResponse(msg *pb.StatusResponse) {
 		}
 	}
 	n.CurrentView = maxView
+	n.LeaderId = n.LeaderElection.GetLeader(n.CurrentView)
 }
 
 func (n *Node) verifyPrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) bool {
