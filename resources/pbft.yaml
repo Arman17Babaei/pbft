@@ -41,6 +41,6 @@ timers:
 
 general:
   enabled_by_default: true
-  max_outstanding_requests: 100
-  checkpoint_interval: 50
-  water_mark_interval: 150
+  max_outstanding_requests: 800
+  checkpoint_interval: 200
+  water_mark_interval: 1000

@@ -4,6 +4,8 @@ package pbft
 
 import (
 	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/monitoring"
+	"github.com/prometheus/client_golang/prometheus"
 	"time"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
@@ -106,6 +108,10 @@ func (n *Node) Run() {
 
 		select {
 		case request := <-n.RequestCh:
+			if len(n.InProgressRequests) >= n.Config.General.MaxOutstandingRequests {
+				monitoring.ClientRequestStatusCounter.WithLabelValues("dropped").Inc()
+				continue
+			}
 			n.handleClientRequest(request)
 		case input := <-n.InputCh:
 			n.handleInput(input)
@@ -155,6 +161,9 @@ func (n *Node) setViewChangeTimer() {
 }
 
 func (n *Node) handleInput(input proto.Message) {
+	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.Config.Id, string(input.ProtoReflect().Descriptor().Name())))
+	defer timer.ObserveDuration()
+
 	switch msg := input.(type) {
 	case *pb.PiggyBackedPrePareRequest:
 		n.handlePrePrepareRequest(msg)
@@ -176,10 +185,14 @@ func (n *Node) handleInput(input proto.Message) {
 }
 
 func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
+	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.Config.Id, "client-request"))
+	defer timer.ObserveDuration()
+
 	if !n.isPrimary() {
 		log.WithField("request", msg.String()).Info("Received client request but not primary")
 		log.WithField("my-id", n.Config.Id).WithField("leader", n.LeaderId).Info("Forwarding request to leader")
 		n.Sender.SendRPCToPeer(n.LeaderId, "Request", msg)
+		monitoring.ClientRequestStatusCounter.WithLabelValues("forward-to-leader").Inc()
 		return
 	}
 
@@ -188,6 +201,7 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 		if !n.RunningTimer {
 			n.setViewChangeTimer()
 		}
+		monitoring.ClientRequestStatusCounter.WithLabelValues("in-view-change").Inc()
 		return
 	}
 
@@ -196,11 +210,14 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 	if len(n.InProgressRequests) >= n.Config.General.MaxOutstandingRequests {
 		log.Warn("Too many outstanding requests, putting request in pending queue")
 		n.PendingRequests = append(n.PendingRequests, msg)
+		monitoring.ClientRequestStatusCounter.WithLabelValues("too-many-outstanding").Inc()
 		return
 	}
 
 	n.LastSequenceNumber++
 	n.InProgressRequests[n.LastSequenceNumber] = struct{}{}
+	monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
+
 	prepreareMessage := &pb.PiggyBackedPrePareRequest{
 		PrePrepareRequest: &pb.PrePrepareRequest{
 			ViewId:         n.CurrentView,
@@ -212,6 +229,7 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 
 	n.Store.AddRequests(n.LastSequenceNumber, []*pb.ClientRequest{msg})
 	n.Sender.Broadcast("PrePrepare", prepreareMessage)
+	monitoring.ClientRequestStatusCounter.WithLabelValues("success").Inc()
 }
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
@@ -239,6 +257,7 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 
 	sequenceNumber := msg.PrePrepareRequest.SequenceNumber
 	n.InProgressRequests[sequenceNumber] = struct{}{}
+	monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
 	n.Preprepares[sequenceNumber] = msg.PrePrepareRequest
 
 	prepareMessage := &pb.PrepareRequest{
@@ -352,6 +371,7 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 		reqs, resps, checkpoints := n.Store.Commit(msg)
 
 		delete(n.InProgressRequests, sequenceNumber)
+		monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
 
 		for _, checkpoint := range checkpoints {
 			checkpoint.ViewId = n.CurrentView
@@ -411,6 +431,7 @@ func (n *Node) handleCheckpointRequest(msg *pb.CheckpointRequest) {
 			delete(n.InProgressRequests, req)
 		}
 	}
+	monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
 }
 
 func (n *Node) goToViewChange() {

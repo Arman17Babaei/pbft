@@ -5,6 +5,7 @@ import (
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"slices"
 	"strconv"
+	"time"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
@@ -115,11 +116,12 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 		reqs = append(reqs, requests...)
 
 		for _, req := range requests {
+			monitoring.ClientRequestLatencySummary.WithLabelValues(s.config.Id).Observe(time.Since(time.Unix(0, req.GetTimestampNs())).Seconds())
 			results = append(results, s.state.apply(req.Operation))
 		}
 
 		if int(s.lastAppliedSequenceNumber+1)%s.config.General.CheckpointInterval == 0 {
-			log.WithField("seq-no", s.lastAppliedSequenceNumber+1).WithField("replica", s.config.Id).Error("created checkpoint for seq-no")
+			log.WithField("seq-no", s.lastAppliedSequenceNumber+1).WithField("replica", s.config.Id).Info("created checkpoint for seq-no")
 			checkpoints = append(checkpoints, &pb.CheckpointRequest{
 				SequenceNumber: s.lastAppliedSequenceNumber + 1,
 				StateDigest:    []byte(s.state.Digest()),

@@ -56,7 +56,7 @@ func main() {
 
 func startNode(config configs.Config) {
 	inputCh := make(chan proto.Message)
-	requestCh := make(chan *pb.ClientRequest)
+	requestCh := make(chan *pb.ClientRequest, 50)
 	enableCh := make(chan any)
 	disableCh := make(chan any)
 	service := pbft.NewService(inputCh, requestCh, enableCh, disableCh, &config)
