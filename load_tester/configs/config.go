@@ -1,4 +1,4 @@
-package config
+package configs
 
 type Config struct {
 	DurationSeconds int `mapstructure:"duration_seconds"`

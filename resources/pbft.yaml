@@ -17,17 +17,30 @@ peers_address:
   node_3:
     host: "0.0.0.0"
     port: 5004
+#  node_4:
+#    host: "0.0.0.0"
+#    port: 5005
+#  node_5:
+#    host: "0.0.0.0"
+#    port: 5006
+#  node_6:
+#    host: "0.0.0.0"
+#    port: 5007
+#  node_7:
+#    host: "0.0.0.0"
+#    port: 5008
+
 
 grpc:
   send_timeout_ms: 2000
-  max_retries: 5
-  max_concurrent_streams: 1000
+  max_retries: 2
+  max_concurrent_streams: 1
 
 timers:
-  view_change_timeout_ms: 10000
+  view_change_timeout_ms: 5000
 
 general:
   enabled_by_default: true
-  max_outstanding_requests: 10
-  checkpoint_interval: 5
-  water_mark_interval: 15
+  max_outstanding_requests: 800
+  checkpoint_interval: 200
+  water_mark_interval: 1000

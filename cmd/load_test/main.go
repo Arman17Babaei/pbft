@@ -3,20 +3,22 @@ package main
 import (
 	"github.com/Arman17Babaei/pbft/config"
 	"github.com/Arman17Babaei/pbft/load_tester"
-	config2 "github.com/Arman17Babaei/pbft/load_tester/config"
+	"github.com/Arman17Babaei/pbft/load_tester/configs"
+	"github.com/Arman17Babaei/pbft/load_tester/monitoring"
 	log "github.com/sirupsen/logrus"
 	"os"
 )
 
 func main() {
-	log.SetLevel(log.WarnLevel)
+	log.SetLevel(log.ErrorLevel)
 	log.SetOutput(os.Stdout)
-	var loadTesterConfig config2.Config
+	var loadTesterConfig configs.Config
 	err := config.LoadConfig(&loadTesterConfig, "load_tester")
 	if err != nil {
 		log.WithError(err).Fatal("could not load config")
 	}
 
 	loadTester := load_tester.NewLoadTest(&loadTesterConfig)
-	loadTester.Run()
+	go loadTester.Run()
+	monitoring.ServeMetrics()
 }

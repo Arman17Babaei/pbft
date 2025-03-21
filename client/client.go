@@ -19,6 +19,7 @@ type Client struct {
 	mu        sync.Mutex
 	config    *Config
 	nodeNames []string
+	nodeConns map[string]pb.PbftClient
 
 	listener          net.Listener
 	grpcServer        *grpc.Server
@@ -32,7 +33,7 @@ type Client struct {
 }
 
 type ResponseCollection struct {
-	mu         sync.RWMutex
+	rcmu       sync.RWMutex
 	collection map[string]map[string]*pb.ClientResponse
 }
 
@@ -43,8 +44,8 @@ func NewResponseCollection() *ResponseCollection {
 }
 
 func (rc *ResponseCollection) AddResponse(response *pb.ClientResponse) {
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
+	rc.rcmu.Lock()
+	defer rc.rcmu.Unlock()
 
 	if _, ok := rc.collection[response.Result.Value]; !ok {
 		rc.collection[response.Result.Value] = make(map[string]*pb.ClientResponse)
@@ -53,8 +54,8 @@ func (rc *ResponseCollection) AddResponse(response *pb.ClientResponse) {
 }
 
 func (rc *ResponseCollection) GetSize(_ string) int {
-	rc.mu.RLock()
-	defer rc.mu.RUnlock()
+	rc.rcmu.RLock()
+	defer rc.rcmu.RUnlock()
 
 	maxLen := 0
 	for _, responses := range rc.collection {
@@ -67,8 +68,8 @@ func (rc *ResponseCollection) GetSize(_ string) int {
 }
 
 func (rc *ResponseCollection) GetResponse() *pb.ClientResponse {
-	rc.mu.RLock()
-	defer rc.mu.RUnlock()
+	rc.rcmu.RLock()
+	defer rc.rcmu.RUnlock()
 
 	maxLen := 0
 	var response *pb.ClientResponse
@@ -88,6 +89,7 @@ func (rc *ResponseCollection) GetResponse() *pb.ClientResponse {
 func NewClient(config *Config) *Client {
 	client := &Client{
 		config:            config,
+		nodeConns:         make(map[string]pb.PbftClient),
 		collectedResponse: make(map[int64]*ResponseCollection),
 		callbackChannels:  make(map[int64]chan<- *pb.OperationResult),
 	}
@@ -112,6 +114,16 @@ func NewClient(config *Config) *Client {
 
 	client.currentLeader = client.nodeNames[rand.Intn(len(client.nodeNames))]
 
+	for id, node := range config.NodesAddress {
+		target := fmt.Sprintf("%s:%d", node.Host, node.Port)
+		conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.WithError(err).WithField("target", target).Error("error creating pbft client")
+		}
+
+		client.nodeConns[id] = pb.NewPbftClient(conn)
+	}
+
 	return client
 }
 
@@ -124,61 +136,51 @@ func (c *Client) Serve() {
 
 func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResult) error {
 	log.Debug("client.sendRequest")
-	//c.mu.Lock()
-	//defer c.mu.Unlock()
-
-	leader := c.config.NodesAddress[c.currentLeader]
-	target := fmt.Sprintf("%s:%d", leader.Host, leader.Port)
-	conn, err := grpc.NewClient(
-		target,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		log.WithError(err).WithField("target", target).Error("error creating pbft client")
-	}
-	defer conn.Close()
-
-	// Send request to the leader
-	leaderClient := pb.NewPbftClient(conn)
+	c.mu.Lock()
+	leaderClient := c.nodeConns[c.currentLeader]
+	c.currentLeader = c.nodeNames[rand.Intn(len(c.nodeNames))]
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.config.GrpcTimeoutMs)*time.Millisecond)
 	defer cancel()
 
-	timestamp := time.Now().UnixMilli()
+	timestamp := time.Now().UnixNano()
 	clientRequest := &pb.ClientRequest{
 		ClientId:    c.config.ClientId,
-		TimestampMs: timestamp,
+		TimestampNs: timestamp,
 		Operation:   op,
 		Callback:    c.callbackAddress,
 	}
 
 	c.callbackChannels[timestamp] = callback
+	c.mu.Unlock()
 
-	_, err = leaderClient.Request(ctx, clientRequest)
+	_, err := leaderClient.Request(ctx, clientRequest)
 	if err != nil {
-		log.WithError(err).Info("error sending request to leader")
+		log.WithError(err).Error("error sending request to leader")
 		return err
 	}
 
 	log.WithField("leader", c.currentLeader).Info("request sent to leader")
-	c.currentLeader = c.nodeNames[rand.Intn(len(c.nodeNames))]
 	return nil
 }
 
 func (c *Client) Response(_ context.Context, response *pb.ClientResponse) (*pb.Empty, error) {
 	log.Debug("client.response")
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	log.WithField("reponse", response.String()).Info("operation result received")
-	if _, ok := c.collectedResponse[response.TimestampMs]; !ok {
-		c.collectedResponse[response.TimestampMs] = NewResponseCollection()
+	c.mu.Lock()
+	if _, ok := c.collectedResponse[response.TimestampNs]; !ok {
+		c.collectedResponse[response.TimestampNs] = NewResponseCollection()
 	}
-	c.collectedResponse[response.TimestampMs].AddResponse(response)
 
-	if c.collectedResponse[response.TimestampMs].GetSize(response.Result.Value) == c.config.F()+1 {
-		log.WithField("timestamp", response.TimestampMs).Info("request response ready")
-		c.callbackChannels[response.TimestampMs] <- c.collectedResponse[response.TimestampMs].GetResponse().Result
+	responseCollection := c.collectedResponse[response.TimestampNs]
+	operationResults := c.callbackChannels[response.TimestampNs]
+	c.mu.Unlock()
+
+	responseCollection.AddResponse(response)
+
+	if responseCollection.GetSize(response.Result.Value) == c.config.F()+1 {
+		log.WithField("timestamp", response.TimestampNs).Info("request response ready")
+		operationResults <- responseCollection.GetResponse().Result
 	}
 
 	return &pb.Empty{}, nil

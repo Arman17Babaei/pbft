@@ -1,8 +1,11 @@
 package pbft
 
 import (
+	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"slices"
 	"strconv"
+	"time"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
@@ -22,7 +25,7 @@ type State struct {
 }
 
 type Store struct {
-	config                    *Config
+	config                    *configs.Config
 	unstableCheckpoints       map[CheckpointId]*CheckpointProof
 	lastStableCheckpoint      *CheckpointProof
 	state                     *State
@@ -31,7 +34,7 @@ type Store struct {
 	committedRequests         map[int64][]*pb.ClientRequest
 }
 
-func NewStore(config *Config) *Store {
+func NewStore(config *configs.Config) *Store {
 	return &Store{
 		config:                    config,
 		unstableCheckpoints:       make(map[CheckpointId]*CheckpointProof),
@@ -67,6 +70,7 @@ func (s *Store) GetLastStableCheckpoint() []*pb.CheckpointRequest {
 
 func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointRequest) {
 	s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
+	s.lastAppliedSequenceNumber = checkpointProof[0].SequenceNumber
 }
 
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
@@ -83,7 +87,7 @@ func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
 	}
 
 	s.unstableCheckpoints[id].proof = append(s.unstableCheckpoints[id].proof, checkpoint)
-	if len(s.unstableCheckpoints[id].proof) > 2*s.config.F() {
+	if len(s.unstableCheckpoints[id].proof) == 2*s.config.F()+1 {
 		sequenceNumber := &s.unstableCheckpoints[id].proof[0].SequenceNumber
 		s.stabilizeCheckpoint(s.unstableCheckpoints[id])
 		return sequenceNumber
@@ -99,6 +103,7 @@ func (s *Store) AddRequests(sequenceNumber int64, reqs []*pb.ClientRequest) {
 
 func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.OperationResult, []*pb.CheckpointRequest) {
 	log.WithField("request", commit.String()).Debug("committing request")
+	//log.WithField("request", commit.GetSequenceNumber()).WithField("replica", s.config.Id).Error("committing request")
 
 	s.committedRequests[commit.SequenceNumber] = s.requests[commit.SequenceNumber]
 
@@ -106,19 +111,20 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 	var results []*pb.OperationResult
 	var checkpoints []*pb.CheckpointRequest
 
+	monitoring.ExecutedRequestsGauge.WithLabelValues(s.config.Id).Set(float64(s.lastAppliedSequenceNumber))
 	for ; s.committedRequests[s.lastAppliedSequenceNumber+1] != nil; s.lastAppliedSequenceNumber++ {
-		reqs = append(reqs, s.requests[s.lastAppliedSequenceNumber+1]...)
+		requests := s.requests[s.lastAppliedSequenceNumber+1]
+		reqs = append(reqs, requests...)
 
-		if commit.RequestDigest != "nil" {
-			for _, req := range s.requests[s.lastAppliedSequenceNumber+1] {
-				results = append(results, s.state.apply(req.Operation))
-			}
+		for _, req := range requests {
+			monitoring.ClientRequestLatencySummary.WithLabelValues(s.config.Id).Observe(time.Since(time.Unix(0, req.GetTimestampNs())).Seconds())
+			results = append(results, s.state.apply(req.Operation))
 		}
 
-		if int(commit.SequenceNumber)%s.config.General.CheckpointInterval == 0 {
-			log.WithField("seq-no", commit.SequenceNumber).Error("created checkpoint for seq-no")
+		if int(s.lastAppliedSequenceNumber+1)%s.config.General.CheckpointInterval == 0 {
+			log.WithField("seq-no", s.lastAppliedSequenceNumber+1).WithField("replica", s.config.Id).Info("created checkpoint for seq-no")
 			checkpoints = append(checkpoints, &pb.CheckpointRequest{
-				SequenceNumber: commit.SequenceNumber,
+				SequenceNumber: s.lastAppliedSequenceNumber + 1,
 				StateDigest:    []byte(s.state.Digest()),
 				ReplicaId:      s.config.Id,
 			})
@@ -165,6 +171,8 @@ func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
 		// Since it can be done outside the critical path, we can ignore it here
 		s.state.apply(&pb.Operation{Type: pb.Operation_ADD, Key: "", Value: string(checkpoint.proof[0].StateDigest)})
 	}
+
+	s.lastAppliedSequenceNumber = checkpoint.proof[0].SequenceNumber
 }
 
 func (s *State) apply(operation *pb.Operation) *pb.OperationResult {

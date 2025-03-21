@@ -25,3 +25,8 @@ go.work.sum
 .env
 
 *.pb.go
+*_mock.go
+*_log
+log_*
+
+.idea/

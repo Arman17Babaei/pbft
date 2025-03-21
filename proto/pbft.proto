@@ -7,7 +7,7 @@ import "general.proto";
 
 message ClientRequest {
     string client_id = 1; // Unique identifier for the client
-    int64 timestamp_ms = 2;        // Unique identifier for the request
+    int64 timestamp_ns = 2;        // Unique identifier for the request
     Operation operation = 3;        // Operation to be performed
     string callback = 4;         // Callback endpoint for the client
 }

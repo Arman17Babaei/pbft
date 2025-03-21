@@ -3,6 +3,8 @@ package pbft
 import (
 	"context"
 	"fmt"
+	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 
 type Sender struct {
 	mu          *sync.RWMutex
+	config      *configs.Config
 	sendTimeout time.Duration
 	maxRetries  int
 	clients     map[string]pb.ClientClient
@@ -24,7 +27,7 @@ type Sender struct {
 	pool        *ants.Pool
 }
 
-func NewSender(config *Config) *Sender {
+func NewSender(config *configs.Config) *Sender {
 	pool, err := ants.NewPool(config.Grpc.MaxConcurrentStreams, ants.WithPreAlloc(true))
 	if err != nil {
 		log.WithError(err).Fatal("failed to create pool")
@@ -49,6 +52,7 @@ func NewSender(config *Config) *Sender {
 
 	return &Sender{
 		mu:          &sync.RWMutex{},
+		config:      config,
 		sendTimeout: time.Duration(config.Grpc.SendTimeoutMs) * time.Millisecond,
 		maxRetries:  config.Grpc.MaxRetries,
 		clients:     make(map[string]pb.ClientClient),
@@ -65,14 +69,17 @@ func (s *Sender) Broadcast(method string, message proto.Message) {
 }
 
 func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Message) {
-	_ = s.pool.Submit(func() {
+	go func() {
 		for i := 0; i < s.maxRetries; i++ {
-			if s.sendRPCToPeer(s.pbftClients[peerID], method, message) {
+			if err := s.sendRPCToPeer(s.pbftClients[peerID], method, message); err == nil {
 				log.WithField("method", method).WithField("peer", peerID).Debug("message sent")
+				monitoring.MessageStatusCounter.WithLabelValues(s.config.Id, peerID, method, "success").Inc()
 				return
+			} else {
+				monitoring.MessageStatusCounter.WithLabelValues(s.config.Id, peerID, method, err.Error()).Inc()
 			}
 		}
-	})
+	}()
 }
 
 func (s *Sender) SendRPCToClient(clientAddress, method string, message proto.Message) {
@@ -116,10 +123,10 @@ func (s *Sender) sendRPCToClient(clientAddress, method string, message proto.Mes
 	}
 }
 
-func (s *Sender) sendRPCToPeer(client pb.PbftClient, method string, message proto.Message) bool {
+func (s *Sender) sendRPCToPeer(client pb.PbftClient, method string, message proto.Message) error {
 	if client == nil {
 		log.Error("peer address is nil")
-		return false
+		return fmt.Errorf("nil address")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), s.sendTimeout)
@@ -129,52 +136,52 @@ func (s *Sender) sendRPCToPeer(client pb.PbftClient, method string, message prot
 	case "Request":
 		if _, err := client.Request(ctx, message.(*pb.ClientRequest)); err != nil {
 			log.WithError(err).Info("failed to send Request")
-			return false
+			return err
 		}
 	case "PrePrepare":
 		if _, err := client.PrePrepare(ctx, message.(*pb.PiggyBackedPrePareRequest)); err != nil {
 			log.WithError(err).Error("failed to send PrePrepare")
-			return false
+			return err
 		}
 	case "Prepare":
 		if _, err := client.Prepare(ctx, message.(*pb.PrepareRequest)); err != nil {
 			log.WithError(err).Error("failed to send Prepare")
-			return false
+			return err
 		}
 	case "Commit":
 		if _, err := client.Commit(ctx, message.(*pb.CommitRequest)); err != nil {
 			log.WithError(err).Error("failed to send Commit")
-			return false
+			return err
 		}
 	case "Checkpoint":
 		if _, err := client.Checkpoint(ctx, message.(*pb.CheckpointRequest)); err != nil {
 			log.WithError(err).Error("failed to send Checkpoint")
-			return false
+			return err
 		}
 	case "ViewChange":
 		if _, err := client.ViewChange(ctx, message.(*pb.ViewChangeRequest)); err != nil {
 			log.WithError(err).Error("failed to send ViewChange")
-			return false
+			return err
 		}
 	case "NewView":
 		if _, err := client.NewView(ctx, message.(*pb.NewViewRequest)); err != nil {
 			log.WithError(err).Error("failed to send NewView")
-			return false
+			return err
 		}
 	case "GetStatus":
 		if _, err := client.GetStatus(ctx, message.(*pb.StatusRequest)); err != nil {
 			log.WithError(err).Error("failed to send GetStatus")
-			return false
+			return err
 		}
 	case "Status":
 		if _, err := client.Status(ctx, message.(*pb.StatusResponse)); err != nil {
 			log.WithError(err).Error("failed to send Status")
-			return false
+			return err
 		}
 	default:
 		log.Error("unknown method")
-		return false
+		return fmt.Errorf("unknown method %s", method)
 	}
 
-	return true
+	return nil
 }
