@@ -3,5 +3,10 @@ throughput_per_second: 1000
 num_clients: 10
 scenario: no_failure
 
-periodic_failure:
-  interval_seconds: 60
+attacks:
+  delayed_proposal:
+    enabled: true
+    affected_node: node_0
+  
+  periodic_failure:
+    interval_seconds: 60

@@ -112,7 +112,7 @@ func (n *Node) Run() {
 				monitoring.ClientRequestStatusCounter.WithLabelValues("dropped").Inc()
 				continue
 			}
-			n.handleClientRequest(request)
+			go n.handleClientRequest(request)
 		case input := <-n.InputCh:
 			n.handleInput(input)
 		case <-n.ViewChangeTimer.C:
@@ -213,6 +213,11 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 		monitoring.ClientRequestStatusCounter.WithLabelValues("too-many-outstanding").Inc()
 		return
 	}
+
+	//if n.Config.Attacks.DelayedProposal.Enabled && n.Config.Attacks.DelayedProposal.AffectedNode == n.Config.Id {
+	//	waitTime := time.Duration(float64(n.Config.Timers.ViewChangeTimeoutMs)*0.8) * time.Millisecond
+	//	time.Sleep(waitTime)
+	//}
 
 	n.LastSequenceNumber++
 	n.InProgressRequests[n.LastSequenceNumber] = struct{}{}

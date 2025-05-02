@@ -2,6 +2,8 @@ module github.com/Arman17Babaei/pbft
 
 go 1.23.0
 
+toolchain go1.24.2
+
 require (
 	github.com/alecthomas/kong v1.6.0
 	github.com/golang/mock v1.6.0

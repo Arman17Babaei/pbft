@@ -130,8 +130,8 @@ func (l *LoadTest) Run() {
 
 func startNode(id string) error {
 	cmd := exec.Command(
-		"/home/arman-babaei/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.23.4.linux-amd64/bin/go",
-		"run", "/home/arman-babaei/sharif/distributed/pbft/cmd/node/main.go",
+		"/Users/gautamsardana/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.2.darwin-arm64/bin/go",
+		"run", "/Users/gautamsardana/go/src/GolandProjects/pbft/cmd/node/main.go",
 		"--id", id)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

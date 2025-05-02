@@ -17,7 +17,7 @@ type CLI struct {
 }
 
 func main() {
-	log.SetLevel(log.ErrorLevel)
+	log.SetLevel(log.InfoLevel)
 	var cli CLI
 	kong.Parse(&cli)
 
