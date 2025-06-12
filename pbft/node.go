@@ -5,6 +5,7 @@ package pbft
 import (
 	"maps"
 	"slices"
+	"sync"
 
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"github.com/Arman17Babaei/pbft/pbft/leader_election"
@@ -27,6 +28,7 @@ type ViewChanger interface {
 }
 
 type Node struct {
+	mu        sync.RWMutex
 	config    *configs.Config
 	sender    ISender
 	Store     *Store
@@ -168,6 +170,9 @@ func (n *Node) handleInput(input proto.Message) {
 }
 
 func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
 	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.config.Id, "client-request"))
 	defer timer.ObserveDuration()
 
@@ -213,6 +218,9 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 }
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
 	//log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.config.Id).Error("PrePrepare received")
 	if n.isPrimary() {
 		log.WithField("request", msg.String()).WithField("my-id", n.config.Id).Warn("Received pre-prepare request but is primary")
@@ -258,6 +266,9 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 }
 
 func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+
 	log.WithField("request", msg.String()).Info("Received prepare request")
 
 	if n.IsInViewChange {
@@ -305,6 +316,9 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 }
 
 func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	log.WithField("request", msg.String()).Info("Received commit request")
 
 	if n.IsInViewChange {
@@ -372,6 +386,9 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 }
 
 func (n *Node) handleCheckpointRequest(msg *pb.CheckpointRequest) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	log.WithField("request", msg.String()).Info("Received checkpoint request")
 
 	stableSequenceNumber := n.Store.AddCheckpointRequest(msg)
@@ -406,8 +423,10 @@ func (n *Node) handleCheckpointRequest(msg *pb.CheckpointRequest) {
 }
 
 func (n *Node) GetCurrentPreparedRequests() []*pb.ViewChangePreparedMessage {
-	prepreparedProof := make([]*pb.ViewChangePreparedMessage, 0, len(n.Commits))
+	n.mu.RLock()
+	defer n.mu.RUnlock()
 
+	prepreparedProof := make([]*pb.ViewChangePreparedMessage, 0, len(n.Commits))
 	for seqNo := range n.Commits {
 		prepreparedProof = append(prepreparedProof, &pb.ViewChangePreparedMessage{
 			PrePrepareRequest: n.Preprepares[seqNo],
@@ -422,6 +441,9 @@ func (n *Node) GoToViewChange() {
 }
 
 func (n *Node) HandleNewViewRequest(msg *pb.NewViewRequest) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
 	log.WithField("my-id", n.config.Id).Info("Received new view request")
 
 	if msg.NewViewId < n.CurrentView {

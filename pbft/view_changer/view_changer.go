@@ -1,6 +1,8 @@
 package view_changer
 
 import (
+	"maps"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -146,107 +148,116 @@ func (p *PbftViewChange) voteViewChange() {
 func (p *PbftViewChange) handleViewChange(msg *pb.ViewChangeRequest) {
 	log.WithField("my-id", p.id).WithField("backup id", msg.ReplicaId).Error("received view change request")
 
-	if msg.NewViewId < p.viewId.Load() {
+	viewId := msg.NewViewId
+	if viewId < p.viewId.Load() {
 		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received view change request with old view")
 		return
 	}
 
-	if p.node.GetLeaderForView(msg.NewViewId) != p.id {
+	if p.node.GetLeaderForView(viewId) != p.id {
 		log.WithField("request", msg.String()).Warn("Received view change request but not leader for view")
 		return
 	}
 
-	if _, ok := p.viewChanges[msg.NewViewId]; !ok {
-		p.viewChanges[msg.NewViewId] = make(map[string]*pb.ViewChangeRequest)
+	if _, ok := p.viewChanges[viewId]; !ok {
+		p.viewChanges[viewId] = make(map[string]*pb.ViewChangeRequest)
 	}
-	p.viewChanges[msg.NewViewId][msg.ReplicaId] = msg
-	log.WithField("backup id", msg.ReplicaId).WithField("len", len(p.viewChanges[msg.NewViewId])).WithField("2f+1", 2*p.config.F()+1).Error("applied view change message")
+	p.viewChanges[viewId][msg.ReplicaId] = msg
+	log.WithField("backup id", msg.ReplicaId).WithField("len", len(p.viewChanges[viewId])).WithField("2f+1", 2*p.config.F()+1).Error("applied view change message")
 
-	if len(p.viewChanges[msg.NewViewId]) == 2*p.config.F()+1 {
-		minSeq := p.store.GetLastStableCheckpoint().GetSequenceNumber()
-		maxSeq := int64(0)
-
-		// Determine minSeq and maxSeq from all ViewChange messages
-		for _, viewChange := range p.viewChanges[msg.NewViewId] {
-			if viewChange.LastStableSequenceNumber < minSeq {
-				minSeq = viewChange.LastStableSequenceNumber
-			}
-			if viewChange.LastStableSequenceNumber > maxSeq {
-				maxSeq = viewChange.LastStableSequenceNumber
-			}
-			for _, preparedProof := range viewChange.PreparedProof {
-				if preparedProof.PrePrepareRequest.SequenceNumber > maxSeq {
-					maxSeq = preparedProof.PrePrepareRequest.SequenceNumber
-				}
-			}
-		}
-
-		// Aggregate highest prepared certificates from all ViewChange messages
-		highestPrepares := make(map[int64]*pb.PrePrepareRequest)
-		for _, viewChange := range p.viewChanges[msg.NewViewId] {
-			for _, preparedProof := range viewChange.PreparedProof {
-				prePrepare := preparedProof.PrePrepareRequest
-				seqNo := prePrepare.SequenceNumber
-
-				if seqNo < minSeq+1 || seqNo > maxSeq {
-					continue
-				}
-
-				// Validate Prepare messages count
-				replicaIDs := make(map[string]struct{})
-				for _, prepare := range preparedProof.PreparedMessages {
-					if prepare.SequenceNumber == seqNo && prepare.RequestDigest == prePrepare.RequestDigest {
-						replicaIDs[prepare.ReplicaId] = struct{}{}
-					}
-				}
-				if len(replicaIDs) < 2*p.config.F() {
-					continue
-				}
-
-				// Update highest view PrePrepare for this sequence number
-				if current, exists := highestPrepares[seqNo]; !exists || prePrepare.ViewId > current.ViewId {
-					highestPrepares[seqNo] = prePrepare
-				}
-			}
-		}
-
-		// Generate new PrePrepares for the new view
-		preprepares := make([]*pb.PrePrepareRequest, 0)
-		for seqNo := minSeq + 1; seqNo <= maxSeq; seqNo++ {
-			var digest string
-			if prePrepare, exists := highestPrepares[seqNo]; exists {
-				digest = prePrepare.RequestDigest
-			} else {
-				digest = "nil"
-			}
-
-			preprepares = append(preprepares, &pb.PrePrepareRequest{
-				ViewId:         msg.NewViewId,
-				SequenceNumber: seqNo,
-				RequestDigest:  digest,
-			})
-		}
-
-		// Collect view change proofs
-		viewChangeMessages := make([]*pb.ViewChangeRequest, 0, len(p.viewChanges[msg.NewViewId]))
-		for _, vc := range p.viewChanges[msg.NewViewId] {
-			viewChangeMessages = append(viewChangeMessages, vc)
-		}
-
-		// Broadcast NewView message
-		newViewMessage := &pb.NewViewRequest{
-			NewViewId:       msg.NewViewId,
-			ViewChangeProof: viewChangeMessages,
-			Preprepares:     preprepares,
-			ReplicaId:       p.id,
-		}
-		p.sender.Broadcast("NewView", newViewMessage)
-		log.WithField("my-id", p.id).Error("broadcasted new view message")
-
-		// Update view changer state
-		p.inViewChange = false
-		p.viewId.Store(msg.NewViewId)
-		p.viewTimer.Reset(p.requestTimeout)
-		p.currentViewChangeTimeout = p.baseViewChangeTimeout
+	if len(p.viewChanges[viewId]) == 2*p.config.F()+1 {
+		p.announceAsLeader(viewId)
 	}
+}
+
+func (p *PbftViewChange) announceAsLeader(viewId int64) {
+	newViewMessage := &pb.NewViewRequest{
+		NewViewId:       viewId,
+		ViewChangeProof: slices.Collect(maps.Values(p.viewChanges[viewId])),
+		Preprepares:     p.createPreprepareMessages(viewId),
+		ReplicaId:       p.id,
+	}
+	p.sender.Broadcast("NewView", newViewMessage)
+	log.WithField("my-id", p.id).Error("broadcasted new view message")
+
+	p.handleNewView(newViewMessage)
+}
+
+func (p *PbftViewChange) createPreprepareMessages(viewId int64) []*pb.PrePrepareRequest {
+	viewChanges := p.viewChanges[viewId]
+	minSeq, maxSeq := getSequenceRange(viewChanges)
+
+	highestPrepares := extractPreprepareRequests(viewChanges, minSeq, p.config.F())
+
+	// Generate new PrePrepares for the new view
+	preprepares := make([]*pb.PrePrepareRequest, 0)
+	for seqNo := minSeq + 1; seqNo <= maxSeq; seqNo++ {
+		var digest string
+		if prePrepare, exists := highestPrepares[seqNo]; exists {
+			digest = prePrepare.RequestDigest
+		} else {
+			digest = "nil"
+		}
+
+		preprepares = append(preprepares, &pb.PrePrepareRequest{
+			ViewId:         viewId,
+			SequenceNumber: seqNo,
+			RequestDigest:  digest,
+		})
+	}
+
+	return preprepares
+}
+
+func extractPreprepareRequests(viewChanges map[string]*pb.ViewChangeRequest, minSeq int64, f int) map[int64]*pb.PrePrepareRequest {
+	highestPrepares := make(map[int64]*pb.PrePrepareRequest)
+	for _, viewChange := range viewChanges {
+		for _, preparedProof := range viewChange.PreparedProof {
+			prePrepare := preparedProof.PrePrepareRequest
+			seqNo := prePrepare.SequenceNumber
+
+			if seqNo <= minSeq || validatePrepareProof(preparedProof, seqNo, prePrepare, f) {
+				continue
+			}
+
+			// Update the highest view PrePrepare for this sequence number
+			if current, exists := highestPrepares[seqNo]; !exists || prePrepare.ViewId > current.ViewId {
+				highestPrepares[seqNo] = prePrepare
+			}
+		}
+	}
+	return highestPrepares
+}
+
+func validatePrepareProof(preparedProof *pb.ViewChangePreparedMessage, seqNo int64, prePrepare *pb.PrePrepareRequest, f int) bool {
+	// Validate Prepare messages count
+	replicaIDs := make(map[string]struct{})
+	for _, prepare := range preparedProof.PreparedMessages {
+		if prepare.SequenceNumber == seqNo && prepare.RequestDigest == prePrepare.RequestDigest {
+			replicaIDs[prepare.ReplicaId] = struct{}{}
+		}
+	}
+	hasValidPrepares := len(replicaIDs) < 2*f
+	return hasValidPrepares
+}
+
+func getSequenceRange(viewChanges map[string]*pb.ViewChangeRequest) (int64, int64) {
+	minSeq := int64(0)
+	maxSeq := int64(0)
+
+	// Determine minSeq and maxSeq from all ViewChange messages
+	for _, viewChange := range viewChanges {
+		if viewChange.LastStableSequenceNumber > minSeq {
+			minSeq = viewChange.LastStableSequenceNumber
+		}
+		if viewChange.LastStableSequenceNumber > maxSeq {
+			maxSeq = viewChange.LastStableSequenceNumber
+		}
+		for _, preparedProof := range viewChange.PreparedProof {
+			if preparedProof.PrePrepareRequest.SequenceNumber > maxSeq {
+				maxSeq = preparedProof.PrePrepareRequest.SequenceNumber
+			}
+		}
+	}
+	return minSeq, maxSeq
 }
