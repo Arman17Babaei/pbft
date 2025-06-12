@@ -158,16 +158,6 @@ func (s *Sender) sendRPCToPeer(client pb.PbftClient, method string, message prot
 			log.WithError(err).Error("failed to send Checkpoint")
 			return err
 		}
-	case "ViewChange":
-		if _, err := client.ViewChange(ctx, message.(*pb.ViewChangeRequest)); err != nil {
-			log.WithError(err).Error("failed to send ViewChange")
-			return err
-		}
-	case "NewView":
-		if _, err := client.NewView(ctx, message.(*pb.NewViewRequest)); err != nil {
-			log.WithError(err).Error("failed to send NewView")
-			return err
-		}
 	case "GetStatus":
 		if _, err := client.GetStatus(ctx, message.(*pb.StatusRequest)); err != nil {
 			log.WithError(err).Error("failed to send GetStatus")

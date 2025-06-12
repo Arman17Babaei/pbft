@@ -3,10 +3,13 @@ package pbft
 //go:generate mockgen -source=node.go -destination=node_mock.go -package=pbft
 
 import (
+	"maps"
+	"slices"
+
 	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/leader_election"
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"github.com/prometheus/client_golang/prometheus"
-	"time"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
@@ -19,19 +22,21 @@ type ISender interface {
 	Broadcast(method string, message proto.Message)
 }
 
+type ViewChanger interface {
+	RequestExecuted(viewId int64)
+}
+
 type Node struct {
-	Config    *configs.Config
-	Sender    ISender
+	config    *configs.Config
+	sender    ISender
 	Store     *Store
 	InputCh   <-chan proto.Message
 	RequestCh <-chan *pb.ClientRequest
 
 	LeaderElection LeaderElection
+	viewChanger    ViewChanger
 
-	RunningTimer    bool
-	ViewChangeTimer *time.Timer
-	IsInViewChange  bool
-	ViewChanges     map[int64]map[string]*pb.ViewChangeRequest
+	IsInViewChange bool
 
 	Preprepares    map[int64]*pb.PrePrepareRequest
 	Prepares       map[int64]map[string]*pb.PrepareRequest
@@ -59,20 +64,19 @@ func NewNode(
 	requestCh <-chan *pb.ClientRequest,
 	enableCh <-chan any,
 	disableCh <-chan any,
+	store *Store,
 ) *Node {
-	leaderElection := NewRoundRobinLeaderElection(config)
+	leaderElection := leader_election.NewRoundRobinLeaderElection(config)
 	return &Node{
-		Config:    config,
-		Sender:    sender,
-		Store:     NewStore(config),
+		config:    config,
+		sender:    sender,
+		Store:     store,
 		InputCh:   inputCh,
 		RequestCh: requestCh,
 
 		LeaderElection: leaderElection,
 
-		RunningTimer:   false,
 		IsInViewChange: false,
-		ViewChanges:    make(map[int64]map[string]*pb.ViewChangeRequest),
 
 		Preprepares:    make(map[int64]*pb.PrePrepareRequest),
 		Prepares:       make(map[int64]map[string]*pb.PrepareRequest),
@@ -93,30 +97,29 @@ func NewNode(
 	}
 }
 
-func (n *Node) Run() {
-	n.ViewChangeTimer = time.NewTimer(time.Second)
-	n.ViewChangeTimer.Stop()
+func (n *Node) SetViewChanger(viewChanger ViewChanger) {
+	n.viewChanger = viewChanger
+}
 
-	n.Sender.Broadcast("GetStatus", &pb.StatusRequest{ReplicaId: n.Config.Id})
+func (n *Node) Run() {
+	n.sender.Broadcast("GetStatus", &pb.StatusRequest{ReplicaId: n.config.Id})
 	for {
 		if !n.Enabled {
 			<-n.EnableCh
 			n.Enabled = true
 			exhaustChannel(n.DisableCh)
-			n.Sender.Broadcast("GetStatus", &pb.StatusRequest{ReplicaId: n.Config.Id})
+			n.sender.Broadcast("GetStatus", &pb.StatusRequest{ReplicaId: n.config.Id})
 		}
 
 		select {
 		case request := <-n.RequestCh:
-			if len(n.InProgressRequests) >= n.Config.General.MaxOutstandingRequests {
+			if len(n.InProgressRequests) >= n.config.General.MaxOutstandingRequests {
 				monitoring.ClientRequestStatusCounter.WithLabelValues("dropped").Inc()
 				continue
 			}
 			n.handleClientRequest(request)
 		case input := <-n.InputCh:
 			n.handleInput(input)
-		case <-n.ViewChangeTimer.C:
-			n.goToViewChange()
 		case <-n.DisableCh:
 			n.Enabled = false
 			exhaustChannel(n.EnableCh)
@@ -141,27 +144,11 @@ func (n *Node) Stop() {
 	close(n.StopCh)
 }
 func (n *Node) isPrimary() bool {
-	return n.Config.Id == n.LeaderId
-}
-
-func (n *Node) setViewChangeTimer() {
-	if n.isPrimary() {
-		log.WithField("my-id", n.Config.Id).Info("stopping view change timer")
-		n.RunningTimer = false
-		n.ViewChangeTimer.Stop()
-		return
-	}
-
-	log.WithField("my-id", n.Config.Id).
-		WithField("leader", n.LeaderId).
-		WithField("duration", time.Duration(n.Config.Timers.ViewChangeTimeoutMs)*time.Millisecond).
-		Info("setting view change timer")
-	n.RunningTimer = true
-	n.ViewChangeTimer.Reset(time.Duration(n.Config.Timers.ViewChangeTimeoutMs) * time.Millisecond)
+	return n.config.Id == n.LeaderId
 }
 
 func (n *Node) handleInput(input proto.Message) {
-	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.Config.Id, string(input.ProtoReflect().Descriptor().Name())))
+	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.config.Id, string(input.ProtoReflect().Descriptor().Name())))
 	defer timer.ObserveDuration()
 
 	switch msg := input.(type) {
@@ -173,10 +160,6 @@ func (n *Node) handleInput(input proto.Message) {
 		n.handleCommitRequest(msg)
 	case *pb.CheckpointRequest:
 		n.handleCheckpointRequest(msg)
-	case *pb.ViewChangeRequest:
-		n.handleViewChangeRequest(msg)
-	case *pb.NewViewRequest:
-		n.handleNewViewRequest(msg)
 	case *pb.StatusRequest:
 		n.handleStatusRequest(msg)
 	case *pb.StatusResponse:
@@ -185,29 +168,26 @@ func (n *Node) handleInput(input proto.Message) {
 }
 
 func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
-	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.Config.Id, "client-request"))
+	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.config.Id, "client-request"))
 	defer timer.ObserveDuration()
 
 	if !n.isPrimary() {
 		log.WithField("request", msg.String()).Info("Received client request but not primary")
-		log.WithField("my-id", n.Config.Id).WithField("leader", n.LeaderId).Info("Forwarding request to leader")
-		n.Sender.SendRPCToPeer(n.LeaderId, "Request", msg)
+		log.WithField("my-id", n.config.Id).WithField("leader", n.LeaderId).Info("Forwarding request to leader")
+		n.sender.SendRPCToPeer(n.LeaderId, "Request", msg)
 		monitoring.ClientRequestStatusCounter.WithLabelValues("forward-to-leader").Inc()
 		return
 	}
 
 	if n.IsInViewChange {
 		log.Warn("Dismissing request because in view change")
-		if !n.RunningTimer {
-			n.setViewChangeTimer()
-		}
 		monitoring.ClientRequestStatusCounter.WithLabelValues("in-view-change").Inc()
 		return
 	}
 
 	log.WithField("request", msg.String()).Info("Received client request")
 
-	if len(n.InProgressRequests) >= n.Config.General.MaxOutstandingRequests {
+	if len(n.InProgressRequests) >= n.config.General.MaxOutstandingRequests {
 		log.Warn("Too many outstanding requests, putting request in pending queue")
 		n.PendingRequests = append(n.PendingRequests, msg)
 		monitoring.ClientRequestStatusCounter.WithLabelValues("too-many-outstanding").Inc()
@@ -216,7 +196,7 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 
 	n.LastSequenceNumber++
 	n.InProgressRequests[n.LastSequenceNumber] = struct{}{}
-	monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
+	monitoring.InProgressRequestsGauge.WithLabelValues(n.config.Id).Set(float64(len(n.InProgressRequests)))
 
 	prepreareMessage := &pb.PiggyBackedPrePareRequest{
 		PrePrepareRequest: &pb.PrePrepareRequest{
@@ -228,28 +208,24 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 	n.Preprepares[n.LastSequenceNumber] = prepreareMessage.PrePrepareRequest
 
 	n.Store.AddRequests(n.LastSequenceNumber, []*pb.ClientRequest{msg})
-	n.Sender.Broadcast("PrePrepare", prepreareMessage)
+	n.sender.Broadcast("PrePrepare", prepreareMessage)
 	monitoring.ClientRequestStatusCounter.WithLabelValues("success").Inc()
 }
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
-	//log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.Config.Id).Error("PrePrepare received")
+	//log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.config.Id).Error("PrePrepare received")
 	if n.isPrimary() {
-		log.WithField("request", msg.String()).WithField("my-id", n.Config.Id).Warn("Received pre-prepare request but is primary")
+		log.WithField("request", msg.String()).WithField("my-id", n.config.Id).Warn("Received pre-prepare request but is primary")
 		return
 	}
 
 	if n.IsInViewChange {
 		log.Warn("Dismissing preprepare because in view change")
-		if !n.RunningTimer {
-			n.setViewChangeTimer()
-		}
 		return
 	}
 
 	log.WithField("request", msg.String()).Info("Received pre-prepare request")
 
-	n.setViewChangeTimer()
 	if !n.verifyPrePrepareRequest(msg) {
 		log.WithField("request", msg.String()).Warn("Failed to verify pre-prepare request")
 		return
@@ -257,21 +233,21 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 
 	sequenceNumber := msg.PrePrepareRequest.SequenceNumber
 	n.InProgressRequests[sequenceNumber] = struct{}{}
-	monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
+	monitoring.InProgressRequestsGauge.WithLabelValues(n.config.Id).Set(float64(len(n.InProgressRequests)))
 	n.Preprepares[sequenceNumber] = msg.PrePrepareRequest
 
 	prepareMessage := &pb.PrepareRequest{
 		ViewId:         msg.PrePrepareRequest.ViewId,
 		SequenceNumber: sequenceNumber,
 		RequestDigest:  msg.PrePrepareRequest.RequestDigest,
-		ReplicaId:      n.Config.Id,
+		ReplicaId:      n.config.Id,
 	}
 
 	n.Prepares[sequenceNumber] = make(map[string]*pb.PrepareRequest)
-	n.Prepares[sequenceNumber][n.Config.Id] = prepareMessage
+	n.Prepares[sequenceNumber][n.config.Id] = prepareMessage
 
 	n.Store.AddRequests(msg.PrePrepareRequest.SequenceNumber, msg.Requests)
-	n.Sender.Broadcast("Prepare", prepareMessage)
+	n.sender.Broadcast("Prepare", prepareMessage)
 
 	for _, prepare := range n.FailedPrepares[sequenceNumber] {
 		n.handlePrepareRequest(prepare)
@@ -286,9 +262,6 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 
 	if n.IsInViewChange {
 		log.Warn("Dismissing prepare because in view change")
-		if !n.RunningTimer {
-			n.setViewChangeTimer()
-		}
 		return
 	}
 
@@ -318,16 +291,16 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 	log.WithField("prepare-nodes", prepareNodes).Info("prepare nodes")
 
 	// prepared
-	if len(n.Prepares[sequenceNumber]) == 2*n.Config.F() {
+	if len(n.Prepares[sequenceNumber]) == 2*n.config.F() {
 		commitMessage := &pb.CommitRequest{
 			ViewId:         msg.ViewId,
 			SequenceNumber: msg.SequenceNumber,
 			RequestDigest:  msg.RequestDigest,
-			ReplicaId:      n.Config.Id,
+			ReplicaId:      n.config.Id,
 		}
 
 		n.handleCommitRequest(commitMessage)
-		n.Sender.Broadcast("Commit", commitMessage)
+		n.sender.Broadcast("Commit", commitMessage)
 	}
 }
 
@@ -336,9 +309,6 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 
 	if n.IsInViewChange {
 		log.Warn("Dismissing commit because in view change")
-		if !n.RunningTimer {
-			n.setViewChangeTimer()
-		}
 		return
 	}
 
@@ -367,16 +337,16 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 	log.WithField("committed-nodes", committeds).Info("committed nodes")
 
 	// committed
-	if len(n.Commits[sequenceNumber]) == 2*n.Config.F()+1 {
+	if len(n.Commits[sequenceNumber]) == 2*n.config.F()+1 {
 		reqs, resps, checkpoints := n.Store.Commit(msg)
 
 		delete(n.InProgressRequests, sequenceNumber)
-		monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
+		monitoring.InProgressRequestsGauge.WithLabelValues(n.config.Id).Set(float64(len(n.InProgressRequests)))
 
 		for _, checkpoint := range checkpoints {
 			checkpoint.ViewId = n.CurrentView
 			n.handleCheckpointRequest(checkpoint)
-			n.Sender.Broadcast("Checkpoint", checkpoint)
+			n.sender.Broadcast("Checkpoint", checkpoint)
 		}
 
 		for i, req := range reqs {
@@ -384,13 +354,14 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 				ViewId:      msg.ViewId,
 				TimestampNs: req.TimestampNs,
 				ClientId:    req.ClientId,
-				ReplicaId:   n.Config.Id,
+				ReplicaId:   n.config.Id,
 				Result:      resps[i],
 			}
-			n.Sender.SendRPCToClient(req.Callback, "Response", reply)
+			n.sender.SendRPCToClient(req.Callback, "Response", reply)
+			n.viewChanger.RequestExecuted(msg.ViewId)
 		}
 
-		if len(n.InProgressRequests) < n.Config.General.MaxOutstandingRequests && len(n.PendingRequests) > 0 {
+		if len(n.InProgressRequests) < n.config.General.MaxOutstandingRequests && len(n.PendingRequests) > 0 {
 			pendings := n.PendingRequests
 			n.PendingRequests = []*pb.ClientRequest{}
 			for _, pending := range pendings {
@@ -431,180 +402,37 @@ func (n *Node) handleCheckpointRequest(msg *pb.CheckpointRequest) {
 			delete(n.InProgressRequests, req)
 		}
 	}
-	monitoring.InProgressRequestsGauge.WithLabelValues(n.Config.Id).Set(float64(len(n.InProgressRequests)))
+	monitoring.InProgressRequestsGauge.WithLabelValues(n.config.Id).Set(float64(len(n.InProgressRequests)))
 }
 
-func (n *Node) goToViewChange() {
-	if n.isPrimary() && !n.IsInViewChange {
-		return
-	}
-
-	log.WithField("node id", n.Config.Id).WithField("leader", n.LeaderElection.GetLeader(n.CurrentView)).Error("view changing")
-	n.setViewChangeTimer()
-	n.IsInViewChange = true
-	n.CurrentView++
-	n.LeaderId = n.LeaderElection.GetLeader(n.CurrentView)
-	var prepreparedProof []*pb.ViewChangePreparedMessage
+func (n *Node) GetCurrentPreparedRequests() []*pb.ViewChangePreparedMessage {
+	prepreparedProof := make([]*pb.ViewChangePreparedMessage, 0, len(n.Commits))
 
 	for seqNo := range n.Commits {
-		preprepare := n.Preprepares[seqNo]
-		var prepareMessages []*pb.PrepareRequest
-		if len(n.Prepares[seqNo]) > n.Config.F()*2+1 {
-			break
-		}
-		for _, prepare := range n.Prepares[seqNo] {
-			prepareMessages = append(prepareMessages, prepare)
-		}
-
-		preparedProof := &pb.ViewChangePreparedMessage{
-			PrePrepareRequest: preprepare,
-			PreparedMessages:  prepareMessages,
-		}
-		prepreparedProof = append(prepreparedProof, preparedProof)
+		prepreparedProof = append(prepreparedProof, &pb.ViewChangePreparedMessage{
+			PrePrepareRequest: n.Preprepares[seqNo],
+			PreparedMessages:  slices.Collect(maps.Values(n.Prepares[seqNo])),
+		})
 	}
-
-	viewChangeRequest := &pb.ViewChangeRequest{
-		NewViewId:                n.CurrentView,
-		LastStableSequenceNumber: n.Store.GetLastStableSequenceNumber(),
-		CheckpointProof:          n.Store.GetLastStableCheckpoint(),
-		PreparedProof:            prepreparedProof,
-		ReplicaId:                n.Config.Id,
-	}
-
-	if n.LeaderId == n.Config.Id {
-		n.handleViewChangeRequest(viewChangeRequest)
-	}
-	n.Sender.Broadcast("ViewChange", viewChangeRequest)
+	return prepreparedProof
 }
 
-func (n *Node) handleViewChangeRequest(msg *pb.ViewChangeRequest) {
-	log.WithField("my-id", n.Config.Id).WithField("backup id", msg.ReplicaId).Error("received view change request")
-
-	if msg.NewViewId < n.CurrentView {
-		log.WithField("request", msg.String()).WithField("current-view", n.CurrentView).Warn("Received view change request with old view")
-		return
-	}
-
-	if n.LeaderElection.GetLeader(msg.NewViewId) != n.Config.Id {
-		log.WithField("request", msg.String()).Warn("Received view change request but not leader for view")
-		return
-	}
-
-	if _, ok := n.ViewChanges[msg.NewViewId]; !ok {
-		n.ViewChanges[msg.NewViewId] = make(map[string]*pb.ViewChangeRequest)
-	}
-	n.ViewChanges[msg.NewViewId][msg.ReplicaId] = msg
-	log.WithField("backup id", msg.ReplicaId).WithField("len", len(n.ViewChanges[msg.NewViewId])).WithField("2f+1", 2*n.Config.F()+1).Error("applied view change message")
-
-	if len(n.ViewChanges[msg.NewViewId]) == 2*n.Config.F()+1 {
-		minSeq := n.Store.GetLastStableSequenceNumber()
-		maxSeq := int64(0)
-
-		// Determine minSeq and maxSeq from all ViewChange messages
-		for _, viewChange := range n.ViewChanges[msg.NewViewId] {
-			if viewChange.LastStableSequenceNumber < minSeq {
-				minSeq = viewChange.LastStableSequenceNumber
-			}
-			if viewChange.LastStableSequenceNumber > maxSeq {
-				maxSeq = viewChange.LastStableSequenceNumber
-			}
-			for _, preparedProof := range viewChange.PreparedProof {
-				if preparedProof.PrePrepareRequest.SequenceNumber > maxSeq {
-					maxSeq = preparedProof.PrePrepareRequest.SequenceNumber
-				}
-			}
-		}
-
-		// Aggregate highest prepared certificates from all ViewChange messages
-		highestPrepares := make(map[int64]*pb.PrePrepareRequest)
-		for _, viewChange := range n.ViewChanges[msg.NewViewId] {
-			for _, preparedProof := range viewChange.PreparedProof {
-				prePrepare := preparedProof.PrePrepareRequest
-				seqNo := prePrepare.SequenceNumber
-
-				if seqNo < minSeq+1 || seqNo > maxSeq {
-					continue
-				}
-
-				// Validate Prepare messages count
-				replicaIDs := make(map[string]struct{})
-				for _, prepare := range preparedProof.PreparedMessages {
-					if prepare.SequenceNumber == seqNo && prepare.RequestDigest == prePrepare.RequestDigest {
-						replicaIDs[prepare.ReplicaId] = struct{}{}
-					}
-				}
-				if len(replicaIDs) < 2*n.Config.F() {
-					continue
-				}
-
-				// Update highest view PrePrepare for this sequence number
-				if current, exists := highestPrepares[seqNo]; !exists || prePrepare.ViewId > current.ViewId {
-					highestPrepares[seqNo] = prePrepare
-				}
-			}
-		}
-
-		// Generate new PrePrepares for the new view
-		preprepares := make([]*pb.PrePrepareRequest, 0)
-		for seqNo := minSeq + 1; seqNo <= maxSeq; seqNo++ {
-			var digest string
-			if prePrepare, exists := highestPrepares[seqNo]; exists {
-				digest = prePrepare.RequestDigest
-			} else {
-				digest = "nil"
-			}
-
-			preprepares = append(preprepares, &pb.PrePrepareRequest{
-				ViewId:         msg.NewViewId,
-				SequenceNumber: seqNo,
-				RequestDigest:  digest,
-			})
-		}
-
-		// Collect view change proofs
-		viewChangeMessages := make([]*pb.ViewChangeRequest, 0, len(n.ViewChanges[msg.NewViewId]))
-		for _, vc := range n.ViewChanges[msg.NewViewId] {
-			viewChangeMessages = append(viewChangeMessages, vc)
-		}
-
-		// Broadcast NewView message
-		newViewMessage := &pb.NewViewRequest{
-			NewViewId:       msg.NewViewId,
-			ViewChangeProof: viewChangeMessages,
-			Preprepares:     preprepares,
-			ReplicaId:       n.Config.Id,
-		}
-		n.Sender.Broadcast("NewView", newViewMessage)
-		log.WithField("my-id", n.Config.Id).Error("broadcasted new view message")
-
-		// Update node state
-		n.IsInViewChange = false
-		n.CurrentView = msg.NewViewId
-		n.LeaderId = n.Config.Id
-		n.LastSequenceNumber = maxSeq
-		n.setViewChangeTimer()
-	}
+func (n *Node) GoToViewChange() {
+	n.IsInViewChange = true
 }
 
-func (n *Node) handleNewViewRequest(msg *pb.NewViewRequest) {
-	log.WithField("my-id", n.Config.Id).Info("Received new view request")
+func (n *Node) HandleNewViewRequest(msg *pb.NewViewRequest) {
+	log.WithField("my-id", n.config.Id).Info("Received new view request")
 
 	if msg.NewViewId < n.CurrentView {
 		log.WithField("request", msg.String()).WithField("current-view", n.CurrentView).Warn("Received new view request with old view")
 		return
 	}
 
-	if !n.verifyNewViewRequest(msg) {
-		log.WithField("request", msg.String()).Warn("Failed to verify new view request")
-		return
-	}
-
 	n.CurrentView = msg.NewViewId
 	n.LeaderId = msg.ReplicaId
-	log.WithField("my-id", n.Config.Id).WithField("leader-id", n.LeaderId).Error("entered new view")
+	log.WithField("my-id", n.config.Id).WithField("leader-id", n.LeaderId).Error("entered new view")
 	n.IsInViewChange = false
-	n.setViewChangeTimer()
-	n.ViewChanges = make(map[int64]map[string]*pb.ViewChangeRequest)
 	n.Preprepares = make(map[int64]*pb.PrePrepareRequest)
 	n.Prepares = make(map[int64]map[string]*pb.PrepareRequest)
 	n.Commits = make(map[int64]map[string]*pb.CommitRequest)
@@ -616,10 +444,10 @@ func (n *Node) handleNewViewRequest(msg *pb.NewViewRequest) {
 			ViewId:         preprepare.ViewId,
 			SequenceNumber: preprepare.SequenceNumber,
 			RequestDigest:  preprepare.RequestDigest,
-			ReplicaId:      n.Config.Id,
+			ReplicaId:      n.config.Id,
 		}
-		n.Prepares[preprepare.SequenceNumber][n.Config.Id] = prepareMessage
-		n.Sender.Broadcast("Prepare", prepareMessage)
+		n.Prepares[preprepare.SequenceNumber][n.config.Id] = prepareMessage
+		n.sender.Broadcast("Prepare", prepareMessage)
 	}
 }
 
@@ -627,11 +455,11 @@ func (n *Node) handleStatusRequest(msg *pb.StatusRequest) {
 	log.WithField("request", msg.String()).Info("Received status request")
 
 	statusResponse := &pb.StatusResponse{
-		LastStableSequenceNumber: n.Store.GetLastStableSequenceNumber(),
-		CheckpointProof:          n.Store.GetLastStableCheckpoint(),
+		LastStableSequenceNumber: n.Store.GetLastStableCheckpoint().GetSequenceNumber(),
+		CheckpointProof:          n.Store.GetLastStableCheckpoint().GetProof(),
 	}
 
-	n.Sender.SendRPCToPeer(msg.ReplicaId, "Status", statusResponse)
+	n.sender.SendRPCToPeer(msg.ReplicaId, "Status", statusResponse)
 }
 
 func (n *Node) handleStatusResponse(msg *pb.StatusResponse) {
@@ -642,7 +470,7 @@ func (n *Node) handleStatusResponse(msg *pb.StatusResponse) {
 		return
 	}
 
-	if msg.LastStableSequenceNumber > n.Store.GetLastStableSequenceNumber() {
+	if msg.LastStableSequenceNumber > n.Store.GetLastStableCheckpoint().GetSequenceNumber() {
 		n.Store.UpdateLastStableCheckpoint(msg.CheckpointProof)
 		n.LastSequenceNumber = msg.LastStableSequenceNumber
 	}
@@ -748,7 +576,7 @@ func (n *Node) verifyNewViewRequest(msg *pb.NewViewRequest) bool {
 
 func (n *Node) verifyStatusResponse(msg *pb.StatusResponse) bool {
 	// TODO: complete verification
-	if msg.LastStableSequenceNumber < n.Store.GetLastStableSequenceNumber() {
+	if msg.LastStableSequenceNumber < n.Store.GetLastStableCheckpoint().GetSequenceNumber() {
 		return false
 	}
 	if len(msg.CheckpointProof) == 0 {
@@ -759,8 +587,8 @@ func (n *Node) verifyStatusResponse(msg *pb.StatusResponse) bool {
 }
 
 func (n *Node) sequenceInWaterMark(sequenceNumber int64) bool {
-	lowWaterMark := n.Store.GetLastStableSequenceNumber() + 1
-	highWaterMark := lowWaterMark + int64(n.Config.General.WaterMarkInterval)
+	lowWaterMark := n.Store.GetLastStableCheckpoint().GetSequenceNumber() + 1
+	highWaterMark := lowWaterMark + int64(n.config.General.WaterMarkInterval)
 	if sequenceNumber < lowWaterMark || sequenceNumber >= highWaterMark {
 		log.WithField("sequence-number", sequenceNumber).
 			WithField("low-water-mark", lowWaterMark).
@@ -770,4 +598,8 @@ func (n *Node) sequenceInWaterMark(sequenceNumber int64) bool {
 	}
 
 	return true
+}
+
+func (n *Node) GetLeaderForView(viewId int64) string {
+	return n.LeaderElection.GetLeader(viewId)
 }

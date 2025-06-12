@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package pbft;
+
+option go_package = ".";
+
+import "general.proto";
+import "pbft.proto";
+
+// View change specific messages
+message ViewChangeRequest {
+  int64 new_view_id = 1;
+  int64 last_stable_sequence_number = 2;
+  repeated pbft.CheckpointRequest checkpoint_proof = 3;
+  repeated ViewChangePreparedMessage prepared_proof = 4;
+  string replica_id = 5;
+}
+
+message ViewChangePreparedMessage {
+  pbft.PrePrepareRequest pre_prepare_request = 1;
+  repeated pbft.PrepareRequest prepared_messages = 2;
+}
+
+message NewViewRequest {
+  int64 new_view_id = 1;
+  repeated ViewChangeRequest view_change_proof = 2;
+  repeated pbft.PrePrepareRequest preprepares = 3;
+  string replica_id = 4;
+}
+
+// gRPC service definition for view change
+service ViewChanger {
+  // Initiate a view change
+  rpc ViewChange(ViewChangeRequest) returns (Empty);
+
+  // Send a NewView message
+  rpc NewView(NewViewRequest) returns (Empty);
+} 

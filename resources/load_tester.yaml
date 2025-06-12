@@ -1,7 +1,7 @@
 duration_seconds: 6000
-throughput_per_second: 1000
-num_clients: 10
-scenario: no_failure
+throughput_per_second: 50
+num_clients: 5
+scenario: periodic_failure
 
 periodic_failure:
-  interval_seconds: 60
+  interval_seconds: 30

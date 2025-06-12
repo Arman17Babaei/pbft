@@ -38,6 +38,7 @@ grpc:
 
 timers:
   view_change_timeout_ms: 5000
+  request_timeout_ms: 5000
 
 general:
   enabled_by_default: true
