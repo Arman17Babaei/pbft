@@ -74,11 +74,24 @@ func (p *PbftViewChange) Run(viewChangeCh <-chan proto.Message) {
 	for msg := range viewChangeCh {
 		switch m := msg.(type) {
 		case *pb.ViewChangeRequest:
-			p.ReceiveViewChange(m)
+			p.handleViewChange(m)
 		case *pb.NewViewRequest:
 			p.handleNewView(m)
 		}
 	}
+}
+
+func (p *PbftViewChange) RequestExecuted(viewId int64) {
+	if p.inViewChange {
+		monitoring.ErrorCounter.WithLabelValues("pbft_view_changer", "RequestReceived", "in_view_change").Inc()
+		return
+	}
+	if p.viewId.Load() != viewId {
+		monitoring.ErrorCounter.WithLabelValues("pbft_view_changer", "RequestReceived", "invalid_view_id").Inc()
+		return
+	}
+
+	p.viewTimer.Reset(p.requestTimeout)
 }
 
 func (p *PbftViewChange) runTimer() {
@@ -95,60 +108,10 @@ func (p *PbftViewChange) runTimer() {
 	}
 }
 
-func (p *PbftViewChange) handleNewView(msg *pb.NewViewRequest) {
-	if msg.NewViewId < p.viewId.Load() {
-		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received new view request with old view")
-		return
-	}
-
-	p.viewId.Store(msg.NewViewId)
-	p.inViewChange = false
-	p.viewTimer.Reset(p.requestTimeout)
-	p.currentViewChangeTimeout = p.baseViewChangeTimeout
-	p.node.HandleNewViewRequest(msg)
-}
-
-func (p *PbftViewChange) RequestExecuted(viewId int64) {
-	if p.inViewChange {
-		monitoring.ErrorCounter.WithLabelValues("pbft_view_changer", "RequestReceived", "in_view_change").Inc()
-		return
-	}
-	if p.viewId.Load() != viewId {
-		monitoring.ErrorCounter.WithLabelValues("pbft_view_changer", "RequestReceived", "invalid_view_id").Inc()
-		return
-	}
-
-	p.viewTimer.Reset(p.requestTimeout)
-}
-
-func (p *PbftViewChange) ReceiveViewChange(msg *pb.ViewChangeRequest) {
-	if msg.NewViewId < p.viewId.Load() {
-		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received view change request with old view")
-		return
-	}
-
-	p.handleViewChange(msg)
-}
-
-func (p *PbftViewChange) voteViewChange() {
-	log.WithField("node id", p.id).Error("view changing")
-	stableCheckpoint := p.store.GetLastStableCheckpoint()
-	viewChangeRequest := &pb.ViewChangeRequest{
-		NewViewId:                p.viewId.Load(),
-		LastStableSequenceNumber: stableCheckpoint.GetSequenceNumber(),
-		CheckpointProof:          stableCheckpoint.GetProof(),
-		PreparedProof:            p.node.GetCurrentPreparedRequests(),
-		ReplicaId:                p.id,
-	}
-
-	p.handleViewChange(viewChangeRequest)
-	p.sender.Broadcast("ViewChange", viewChangeRequest)
-}
-
 func (p *PbftViewChange) handleViewChange(msg *pb.ViewChangeRequest) {
+	viewId := msg.NewViewId
 	log.WithField("my-id", p.id).WithField("backup id", msg.ReplicaId).Error("received view change request")
 
-	viewId := msg.NewViewId
 	if viewId < p.viewId.Load() {
 		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received view change request with old view")
 		return
@@ -168,6 +131,34 @@ func (p *PbftViewChange) handleViewChange(msg *pb.ViewChangeRequest) {
 	if len(p.viewChanges[viewId]) == 2*p.config.F()+1 {
 		p.announceAsLeader(viewId)
 	}
+}
+
+func (p *PbftViewChange) handleNewView(msg *pb.NewViewRequest) {
+	if msg.NewViewId < p.viewId.Load() {
+		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received new view request with old view")
+		return
+	}
+
+	p.viewId.Store(msg.NewViewId)
+	p.inViewChange = false
+	p.viewTimer.Reset(p.requestTimeout)
+	p.currentViewChangeTimeout = p.baseViewChangeTimeout
+	p.node.HandleNewViewRequest(msg)
+}
+
+func (p *PbftViewChange) voteViewChange() {
+	log.WithField("node id", p.id).Error("view changing")
+	stableCheckpoint := p.store.GetLastStableCheckpoint()
+	viewChangeRequest := &pb.ViewChangeRequest{
+		NewViewId:                p.viewId.Load(),
+		LastStableSequenceNumber: stableCheckpoint.GetSequenceNumber(),
+		CheckpointProof:          stableCheckpoint.GetProof(),
+		PreparedProof:            p.node.GetCurrentPreparedRequests(),
+		ReplicaId:                p.id,
+	}
+
+	p.handleViewChange(viewChangeRequest)
+	p.sender.Broadcast("ViewChange", viewChangeRequest)
 }
 
 func (p *PbftViewChange) announceAsLeader(viewId int64) {
@@ -241,11 +232,11 @@ func validatePrepareProof(preparedProof *pb.ViewChangePreparedMessage, seqNo int
 	return hasValidPrepares
 }
 
+// Determine minSeq and maxSeq from all ViewChange messages
 func getSequenceRange(viewChanges map[string]*pb.ViewChangeRequest) (int64, int64) {
 	minSeq := int64(0)
 	maxSeq := int64(0)
 
-	// Determine minSeq and maxSeq from all ViewChange messages
 	for _, viewChange := range viewChanges {
 		if viewChange.LastStableSequenceNumber > minSeq {
 			minSeq = viewChange.LastStableSequenceNumber
