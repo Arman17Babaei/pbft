@@ -24,6 +24,10 @@ func NewRoundRobinLeaderElection(config *configs.Config) *RoundRobin {
 	}
 }
 
-func (r *RoundRobin) GetLeader(view int64) string {
-	return r.peerIds[view%int64(len(r.peerIds))]
+func (r *RoundRobin) GetLeader(viewId int64) string {
+	return r.peerIds[viewId%int64(len(r.peerIds))]
+}
+
+func (r *RoundRobin) FindLeaderForView(viewId int64, callbackCh chan string) {
+	callbackCh <- r.peerIds[viewId%int64(len(r.peerIds))]
 }

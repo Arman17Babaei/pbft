@@ -625,7 +625,3 @@ func (n *Node) sequenceInWaterMark(sequenceNumber int64) bool {
 
 	return true
 }
-
-func (n *Node) GetLeaderForView(viewId int64) string {
-	return n.LeaderElection.GetLeader(viewId)
-}

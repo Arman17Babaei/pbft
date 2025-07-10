@@ -21,9 +21,12 @@ type ISender interface {
 
 type Node interface {
 	GetCurrentPreparedRequests() []*pb.ViewChangePreparedMessage
-	GetLeaderForView(viewId int64) string
 	HandleNewViewRequest(msg *pb.NewViewRequest)
 	GoToViewChange()
+}
+
+type LeaderElection interface {
+	FindLeaderForView(viewId int64, callbackCh chan string)
 }
 
 type PbftViewChange struct {
@@ -31,10 +34,14 @@ type PbftViewChange struct {
 	baseViewChangeTimeout time.Duration
 	requestTimeout        time.Duration
 
-	store  *pbft.Store
-	node   Node
-	config *configs.Config
-	sender ISender
+	store          *pbft.Store
+	node           Node
+	leaderElection LeaderElection
+	config         *configs.Config
+	sender         ISender
+
+	leaderForView    string
+	leaderElectionCh chan string
 
 	viewId                   atomic.Int64
 	inViewChange             bool
@@ -44,17 +51,24 @@ type PbftViewChange struct {
 	viewChanges map[int64]map[string]*pb.ViewChangeRequest
 }
 
-func NewPbftViewChange(config *configs.Config, store *pbft.Store, sender ISender) *PbftViewChange {
+func NewPbftViewChange(
+	config *configs.Config, store *pbft.Store, sender ISender, leaderElection LeaderElection,
+) *PbftViewChange {
 	viewChangeTimeout := time.Duration(config.Timers.ViewChangeTimeoutMs) * time.Millisecond
 	requestTimeout := time.Duration(config.Timers.RequestTimeoutMs) * time.Millisecond
+	if config.Id == "" {
+		log.Fatal("empty node id")
+	}
+
 	p := &PbftViewChange{
 		id:                    config.Id,
 		baseViewChangeTimeout: viewChangeTimeout,
 		requestTimeout:        requestTimeout,
 
-		store:  store,
-		config: config,
-		sender: sender,
+		store:          store,
+		config:         config,
+		leaderElection: leaderElection,
+		sender:         sender,
 
 		viewId:                   atomic.Int64{},
 		inViewChange:             false,
@@ -99,9 +113,10 @@ func (p *PbftViewChange) runTimer() {
 		select {
 		case <-p.viewTimer.C:
 			p.inViewChange = true
-			p.viewId.Add(1)
+			viewId := p.viewId.Add(1)
 			p.node.GoToViewChange()
-			go p.voteViewChange()
+			p.startLeaderElection(viewId)
+			go p.voteViewChange(viewId)
 			p.viewTimer.Reset(p.currentViewChangeTimeout)
 			p.currentViewChangeTimeout = p.currentViewChangeTimeout * 2
 		}
@@ -117,20 +132,18 @@ func (p *PbftViewChange) handleViewChange(msg *pb.ViewChangeRequest) {
 		return
 	}
 
-	if p.node.GetLeaderForView(viewId) != p.id {
-		log.WithField("request", msg.String()).Warn("Received view change request but not leader for view")
-		return
-	}
-
 	if _, ok := p.viewChanges[viewId]; !ok {
 		p.viewChanges[viewId] = make(map[string]*pb.ViewChangeRequest)
 	}
 	p.viewChanges[viewId][msg.ReplicaId] = msg
-	log.WithField("backup id", msg.ReplicaId).WithField("len", len(p.viewChanges[viewId])).WithField("2f+1", 2*p.config.F()+1).Error("applied view change message")
+	log.WithField("backup id", msg.ReplicaId).WithField("len", len(p.viewChanges[viewId])).Error("applied view change message")
 
-	if len(p.viewChanges[viewId]) == 2*p.config.F()+1 {
-		p.announceAsLeader(viewId)
+	if p.leaderForView != p.id {
+		log.WithField("request", msg.String()).Debug("Received view change request but not leader for view yet")
+		return
 	}
+
+	p.tryAnnounceAsLeader(viewId)
 }
 
 func (p *PbftViewChange) handleNewView(msg *pb.NewViewRequest) {
@@ -146,11 +159,11 @@ func (p *PbftViewChange) handleNewView(msg *pb.NewViewRequest) {
 	p.node.HandleNewViewRequest(msg)
 }
 
-func (p *PbftViewChange) voteViewChange() {
+func (p *PbftViewChange) voteViewChange(viewId int64) {
 	log.WithField("node id", p.id).Error("view changing")
 	stableCheckpoint := p.store.GetLastStableCheckpoint()
 	viewChangeRequest := &pb.ViewChangeRequest{
-		NewViewId:                p.viewId.Load(),
+		NewViewId:                viewId,
 		LastStableSequenceNumber: stableCheckpoint.GetSequenceNumber(),
 		CheckpointProof:          stableCheckpoint.GetProof(),
 		PreparedProof:            p.node.GetCurrentPreparedRequests(),
@@ -161,7 +174,16 @@ func (p *PbftViewChange) voteViewChange() {
 	p.sender.Broadcast("ViewChange", viewChangeRequest)
 }
 
-func (p *PbftViewChange) announceAsLeader(viewId int64) {
+func (p *PbftViewChange) tryAnnounceAsLeader(viewId int64) {
+	if p.viewId.Load() != viewId {
+		log.WithField("viewId", viewId).WithField("currentId", p.viewId.Load()).Warn("trying to become leader on different view")
+		return
+	}
+	if len(p.viewChanges[viewId]) < 2*p.config.F()+1 {
+		log.WithField("viewId", viewId).WithField("viewChanges", len(p.viewChanges[viewId])).Info("too soon to announce as leader")
+		return
+	}
+
 	newViewMessage := &pb.NewViewRequest{
 		NewViewId:       viewId,
 		ViewChangeProof: slices.Collect(maps.Values(p.viewChanges[viewId])),
@@ -198,6 +220,23 @@ func (p *PbftViewChange) createPreprepareMessages(viewId int64) []*pb.PrePrepare
 	}
 
 	return preprepares
+}
+
+func (p *PbftViewChange) startLeaderElection(viewId int64) {
+	// TODO: putting leaderIds in a map can avoid concurrency issues in view change
+	p.leaderElectionCh = make(chan string) // A new channel not to be confused with previous ongoing elections
+	p.leaderElection.FindLeaderForView(viewId, p.leaderElectionCh)
+	go func(viewId int64, leaderElectionCh chan string) {
+		leaderId := <-leaderElectionCh
+		if viewId != p.viewId.Load() {
+			log.WithField("initialView", viewId).WithField("viewId", p.viewId.Load()).Warn("view has changed during leader election")
+			return
+		}
+		p.leaderForView = leaderId
+		if p.id == leaderId {
+			p.tryAnnounceAsLeader(viewId) // if not enough view changes are gathered, this will be called on view change
+		}
+	}(viewId, p.leaderElectionCh)
 }
 
 func extractPreprepareRequests(viewChanges map[string]*pb.ViewChangeRequest, minSeq int64, f int) map[int64]*pb.PrePrepareRequest {

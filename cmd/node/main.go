@@ -3,6 +3,7 @@ package main
 import (
 	// Standard library imports
 
+	"github.com/Arman17Babaei/pbft/pbft/leader_election"
 	// Third party imports
 	"github.com/alecthomas/kong"
 	log "github.com/sirupsen/logrus"
@@ -86,7 +87,8 @@ func startNode(config configs.Config) {
 	node := pbft.NewNode(&config, pbftSender, channels.input, channels.request,
 		channels.enable, channels.disable, store)
 
-	viewChanger := setupViewChanger(&config, store, viewChangeSender, node)
+	leaderElection := leader_election.NewRoundRobinLeaderElection(&config)
+	viewChanger := setupViewChanger(&config, store, viewChangeSender, node, leaderElection)
 	node.SetViewChanger(viewChanger)
 
 	startServices(config, channels, node, viewChanger)
@@ -111,14 +113,16 @@ func createChannels() nodeChannels {
 }
 
 func setupViewChanger(config *configs.Config, store *pbft.Store,
-	sender view_changer.ISender, node *pbft.Node) *view_changer.PbftViewChange {
-	viewChanger := view_changer.NewPbftViewChange(config, store, sender)
+	sender view_changer.ISender, node *pbft.Node, leaderElection view_changer.LeaderElection,
+) *view_changer.PbftViewChange {
+	viewChanger := view_changer.NewPbftViewChange(config, store, sender, leaderElection)
 	viewChanger.SetNode(node)
 	return viewChanger
 }
 
 func startServices(config configs.Config, channels nodeChannels,
-	node *pbft.Node, viewChanger *view_changer.PbftViewChange) {
+	node *pbft.Node, viewChanger *view_changer.PbftViewChange,
+) {
 	service := pbft.NewService(channels.input, channels.request,
 		channels.enable, channels.disable, &config)
 	viewChangeService := view_changer.NewService(channels.viewChange, &config)
