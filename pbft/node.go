@@ -27,6 +27,10 @@ type ViewChanger interface {
 	RequestExecuted(viewId int64)
 }
 
+type LeaderElection interface {
+	GetLeader(view int64) string
+}
+
 type Node struct {
 	mu        sync.RWMutex
 	config    *configs.Config
