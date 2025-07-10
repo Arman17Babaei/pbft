@@ -225,7 +225,7 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 
-	//log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.config.Id).Error("PrePrepare received")
+	log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.config.Id).Info("PrePrepare received")
 	if n.isPrimary() {
 		log.WithField("request", msg.String()).WithField("my-id", n.config.Id).Warn("Received pre-prepare request but is primary")
 		return
@@ -262,16 +262,16 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 	n.sender.Broadcast("Prepare", prepareMessage)
 
 	for _, prepare := range n.FailedPrepares[sequenceNumber] {
-		n.handlePrepareRequest(prepare)
+		go n.handlePrepareRequest(prepare)
 	}
 	for _, commit := range n.FailedCommits[sequenceNumber] {
-		n.handleCommitRequest(commit)
+		go n.handleCommitRequest(commit)
 	}
 }
 
 func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
+	n.mu.Lock()
+	defer n.mu.Unlock()
 
 	log.WithField("request", msg.String()).Info("Received prepare request")
 
@@ -314,7 +314,7 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 			ReplicaId:      n.config.Id,
 		}
 
-		n.handleCommitRequest(commitMessage)
+		go n.handleCommitRequest(commitMessage)
 		n.sender.Broadcast("Commit", commitMessage)
 	}
 }
@@ -363,7 +363,7 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 
 		for _, checkpoint := range checkpoints {
 			checkpoint.ViewId = n.CurrentView
-			n.handleCheckpointRequest(checkpoint)
+			go n.handleCheckpointRequest(checkpoint)
 			n.sender.Broadcast("Checkpoint", checkpoint)
 		}
 
@@ -383,7 +383,7 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 			pendings := n.PendingRequests
 			n.PendingRequests = []*pb.ClientRequest{}
 			for _, pending := range pendings {
-				n.handleClientRequest(pending)
+				go n.handleClientRequest(pending)
 			}
 		}
 	}

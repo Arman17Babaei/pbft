@@ -173,6 +173,5 @@ func (s *Sender) sendRPCToPeer(client pb.PbftClient, method string, message prot
 		return fmt.Errorf("unknown method %s", method)
 	}
 
-	log.WithField("method", method).Error("succeed")
 	return nil
 }
