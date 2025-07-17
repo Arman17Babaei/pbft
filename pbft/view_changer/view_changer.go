@@ -224,7 +224,7 @@ func (p *PbftViewChange) createPreprepareMessages(viewId int64) []*pb.PrePrepare
 
 func (p *PbftViewChange) startLeaderElection(viewId int64) {
 	// TODO: putting leaderIds in a map can avoid concurrency issues in view change
-	p.leaderElectionCh = make(chan string) // A new channel not to be confused with previous ongoing elections
+	p.leaderElectionCh = make(chan string, 1) // A new channel not to be confused with previous ongoing elections
 	p.leaderElection.FindLeaderForView(viewId, p.leaderElectionCh)
 	go func(viewId int64, leaderElectionCh chan string) {
 		leaderId := <-leaderElectionCh
