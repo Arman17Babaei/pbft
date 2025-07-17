@@ -595,23 +595,6 @@ func (n *Node) verifyCommitRequest(msg *pb.CommitRequest) bool {
 	return true
 }
 
-func (n *Node) verifyNewViewRequest(msg *pb.NewViewRequest) bool {
-	if msg.NewViewId < n.ViewData.CurrentView {
-		return false
-	}
-
-	// TODO: A backup accepts a new-view message for view v + 1
-	// if it is signed properly, if the view-change messages it
-	// contains are valid for view v + 1, and if the set O is
-	// correct; it verifies the correctness of O by performing a
-	// computation similar to the one used by the primary to
-	// create O. Then it adds the new information to its log as
-	// described for the primary, multicasts a prepare for each
-	// message in to all the other replicas, adds these prepares
-	// to its log, and enters view v + 1.
-	return true
-}
-
 func (n *Node) verifyStatusResponse(msg *pb.StatusResponse) bool {
 	// TODO: complete verification
 	if msg.LastStableSequenceNumber < n.Store.GetLastStableCheckpoint().GetSequenceNumber() {
