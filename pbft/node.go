@@ -122,6 +122,7 @@ func (n *Node) SetViewChanger(viewChanger ViewChanger) {
 func (n *Node) Run() {
 	n.sender.Broadcast("GetStatus", &pb.StatusRequest{ReplicaId: n.config.Id})
 	for {
+		monitoring.LeaderCounter.WithLabelValues(n.config.Id, n.ViewData.LeaderId).Inc()
 		if !n.Enabled {
 			<-n.EnableCh
 			n.Enabled = true

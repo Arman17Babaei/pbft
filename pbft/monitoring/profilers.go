@@ -62,3 +62,10 @@ var ErrorCounter = promauto.NewCounterVec(
 	},
 	[]string{"component", "step", "error"},
 )
+
+var LeaderCounter = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "leader_counter",
+	},
+	[]string{"node_id", "leader_id"},
+)
