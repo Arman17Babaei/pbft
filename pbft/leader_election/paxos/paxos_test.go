@@ -1,4 +1,4 @@
-package raft
+package paxos
 
 import (
 	"github.com/Arman17Babaei/pbft/pbft/configs"
@@ -28,7 +28,7 @@ func TestRaftElection_FindLeaderForView(t *testing.T) {
 
 	// 4 of these
 	node := NewMockNode(ctrl)
-	leaderElection := NewRaftElection(config, node)
+	leaderElection := NewPaxosElection(config, node)
 
 	time.Sleep(1 * time.Second)
 	callbackChan := make(chan string)
