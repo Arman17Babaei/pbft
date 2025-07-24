@@ -1,8 +1,9 @@
 package leader_election
 
 import (
-	pb "github.com/Arman17Babaei/pbft/proto"
 	"slices"
+
+	pb "github.com/Arman17Babaei/pbft/proto"
 
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 )
