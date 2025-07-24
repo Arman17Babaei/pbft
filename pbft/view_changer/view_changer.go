@@ -114,6 +114,7 @@ func (p *PbftViewChange) runTimer() {
 		case <-p.viewTimer.C:
 			p.inViewChange = true
 			viewId := p.viewId.Add(1)
+			p.leaderForView = ""
 			p.node.GoToViewChange()
 			p.startLeaderElection(viewId)
 			go p.voteViewChange(viewId)
@@ -147,11 +148,6 @@ func (p *PbftViewChange) handleViewChange(msg *pb.ViewChangeRequest) {
 }
 
 func (p *PbftViewChange) handleNewView(msg *pb.NewViewRequest) {
-	if msg.NewViewId < p.viewId.Load() {
-		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received new view request with old view")
-		return
-	}
-
 	p.viewId.Store(msg.NewViewId)
 	p.inViewChange = false
 	p.viewTimer.Reset(p.requestTimeout)

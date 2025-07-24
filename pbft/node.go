@@ -240,19 +240,19 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 
 	log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.config.Id).Info("PrePrepare received")
 	if n.isPrimary() {
-		log.WithField("request", msg.String()).WithField("my-id", n.config.Id).Warn("Received pre-prepare request but is primary")
+		monitoring.ErrorCounter.WithLabelValues("pbft_node", "handlePrePrepareRequest", "is_primary").Inc()
 		return
 	}
 
 	if n.ViewData.IsInViewChange {
-		log.Warn("Dismissing preprepare because in view change")
+		monitoring.ErrorCounter.WithLabelValues("pbft_node", "handlePrePrepareRequest", "in_view_change").Inc()
 		return
 	}
 
 	log.WithField("request", msg.String()).Info("Received pre-prepare request")
 
 	if !n.verifyPrePrepareRequest(msg) {
-		log.WithField("request", msg.String()).Warn("Failed to verify pre-prepare request")
+		monitoring.ErrorCounter.WithLabelValues("pbft_node", "handlePrePrepareRequest", "verification_failed").Inc()
 		return
 	}
 
@@ -464,13 +464,27 @@ func (n *Node) HandleNewViewRequest(msg *pb.NewViewRequest) {
 	log.WithField("my-id", n.config.Id).Info("Received new view request")
 
 	if msg.NewViewId < n.ViewData.CurrentView {
-		log.WithField("request", msg.String()).WithField("current-view", n.ViewData.CurrentView).Warn("Received new view request with old view")
+		monitoring.ErrorCounter.WithLabelValues("pbft_node", "HandleNewViewRequest", "old_view").Inc()
+		log.WithField("request", msg.String()).WithField("current-view", n.ViewData.CurrentView).Error("Received new view request with old view")
 		return
 	}
 
 	minSeqNo := int64(math.MaxInt64)
 	for _, preprepare := range msg.Preprepares {
 		minSeqNo = min(minSeqNo, preprepare.SequenceNumber)
+	}
+
+	if minSeqNo == int64(math.MaxInt64) {
+		for _, viewChangeProof := range msg.ViewChangeProof {
+			minSeqNo = min(minSeqNo, viewChangeProof.LastStableSequenceNumber)
+		}
+	}
+	if minSeqNo == int64(math.MaxInt64) {
+		log.WithFields(log.Fields{
+			"request":      msg.String(),
+			"current-view": n.ViewData.CurrentView,
+			"min-seq-no":   minSeqNo,
+		}).Fatal("No valid sequence number found in new view request")
 	}
 
 	n.ViewData = NewViewData(msg.NewViewId, minSeqNo, msg.ReplicaId)
@@ -505,7 +519,7 @@ func (n *Node) handleStatusResponse(msg *pb.StatusResponse) {
 	log.WithField("request", msg.String()).Info("Received status response")
 
 	if !n.verifyStatusResponse(msg) {
-		log.WithField("request", msg.String()).Info("Failed to verify status response")
+		log.WithField("request", msg.String()).Error("Failed to verify status response")
 		return
 	}
 
@@ -519,8 +533,9 @@ func (n *Node) handleStatusResponse(msg *pb.StatusResponse) {
 			maxView = p.ViewId
 		}
 	}
-	n.ViewData.CurrentView = maxView
-	n.ViewData.LeaderId = n.LeaderElection.GetLeader(n.ViewData.CurrentView)
+
+	n.ViewData = NewViewData(maxView, msg.LastStableSequenceNumber+1, n.LeaderElection.GetLeader(maxView))
+	// TODO: set n.Store
 }
 
 func (n *Node) verifyPrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) bool {

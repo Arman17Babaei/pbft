@@ -37,11 +37,11 @@ grpc:
   max_concurrent_streams: 1
 
 timers:
-  view_change_timeout_ms: 5000
-  request_timeout_ms: 5000
+  view_change_timeout_ms: 30000
+  request_timeout_ms: 30000
 
 general:
   enabled_by_default: true
-  max_outstanding_requests: 800
-  checkpoint_interval: 200
-  water_mark_interval: 1000
+  max_outstanding_requests: 80
+  checkpoint_interval: 20
+  water_mark_interval: 100
