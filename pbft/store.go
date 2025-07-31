@@ -70,8 +70,12 @@ func (s *Store) GetLastStableCheckpoint() *CheckpointProof {
 }
 
 func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointRequest) {
-	s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
-	s.lastAppliedSequenceNumber = checkpointProof[0].SequenceNumber
+	if s.lastStableCheckpoint.GetSequenceNumber() < checkpointProof[0].SequenceNumber {
+		s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
+	}
+	if s.lastAppliedSequenceNumber < checkpointProof[0].SequenceNumber {
+		s.lastAppliedSequenceNumber = checkpointProof[0].SequenceNumber
+	}
 }
 
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
@@ -104,7 +108,6 @@ func (s *Store) AddRequests(sequenceNumber int64, reqs []*pb.ClientRequest) {
 
 func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.OperationResult, []*pb.CheckpointRequest) {
 	log.WithField("request", commit.String()).Debug("committing request")
-	//log.WithField("request", commit.GetSequenceNumber()).WithField("replica", s.config.Id).Error("committing request")
 
 	s.committedRequests[commit.SequenceNumber] = s.requests[commit.SequenceNumber]
 
@@ -140,6 +143,11 @@ func (s *State) digest() string {
 }
 
 func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
+	if s.lastStableCheckpoint.GetSequenceNumber() >= checkpoint.proof[0].SequenceNumber {
+		log.WithField("checkpoint", checkpoint.proof[0].SequenceNumber).Debug("not stabilizing checkpoint")
+		return
+	}
+
 	log.WithField("checkpoint", checkpoint.proof[0].SequenceNumber).Debug("stabilizing checkpoint")
 	s.lastStableCheckpoint = checkpoint
 
@@ -173,7 +181,9 @@ func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
 		s.state.apply(&pb.Operation{Type: pb.Operation_ADD, Key: "", Value: string(checkpoint.proof[0].StateDigest)})
 	}
 
-	s.lastAppliedSequenceNumber = checkpoint.proof[0].SequenceNumber
+	if s.lastAppliedSequenceNumber < checkpoint.proof[0].SequenceNumber {
+		s.lastAppliedSequenceNumber = checkpoint.proof[0].SequenceNumber
+	}
 }
 
 func (s *State) apply(operation *pb.Operation) *pb.OperationResult {

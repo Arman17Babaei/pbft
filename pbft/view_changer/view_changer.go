@@ -2,6 +2,7 @@ package view_changer
 
 import (
 	"maps"
+	"math"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -269,11 +270,15 @@ func validatePrepareProof(preparedProof *pb.ViewChangePreparedMessage, seqNo int
 
 // Determine minSeq and maxSeq from all ViewChange messages
 func getSequenceRange(viewChanges map[string]*pb.ViewChangeRequest) (int64, int64) {
-	minSeq := int64(0)
+	if len(viewChanges) == 0 {
+		log.Fatal("now view change for sequence range")
+	}
+
+	minSeq := int64(math.MaxInt64)
 	maxSeq := int64(0)
 
 	for _, viewChange := range viewChanges {
-		if viewChange.LastStableSequenceNumber > minSeq {
+		if viewChange.LastStableSequenceNumber < minSeq {
 			minSeq = viewChange.LastStableSequenceNumber
 		}
 		if viewChange.LastStableSequenceNumber > maxSeq {
