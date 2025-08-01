@@ -74,7 +74,7 @@ func TestNode_Run(t *testing.T) {
 		node.Stop()
 		wg.Wait()
 
-		assert.Equal(t, node.Preprepares[1], preprepareRequest)
+		assert.Equal(t, node.ViewData.Preprepares[1], preprepareRequest)
 	})
 
 	t.Run("initiate prepare on preprepare for backup", func(t *testing.T) {
@@ -83,7 +83,7 @@ func TestNode_Run(t *testing.T) {
 		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
 		node.SetViewChanger(viewChanger)
 
-		node.LeaderId = "" // no-one is leader
+		node.ViewData.LeaderId = "" // no-one is leader
 		request := newRequest()
 		preprepareMessage := &pb.PiggyBackedPrePareRequest{
 			PrePrepareRequest: &pb.PrePrepareRequest{
@@ -125,7 +125,7 @@ func TestNode_Run(t *testing.T) {
 		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
 		node.SetViewChanger(viewChanger)
 
-		node.LeaderId = config.Id // is leader
+		node.ViewData.LeaderId = config.Id // is leader
 		request := newRequest()
 		preprepareMessage := &pb.PiggyBackedPrePareRequest{
 			PrePrepareRequest: &pb.PrePrepareRequest{
@@ -156,7 +156,7 @@ func TestNode_Run(t *testing.T) {
 		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
 		node.SetViewChanger(viewChanger)
 
-		node.LeaderId = "" // no-one is leader
+		node.ViewData.LeaderId = "" // no-one is leader
 		request := newRequest()
 		preprepareMessage := &pb.PiggyBackedPrePareRequest{
 			PrePrepareRequest: &pb.PrePrepareRequest{
@@ -196,7 +196,7 @@ func TestNode_Run(t *testing.T) {
 		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
 		node.SetViewChanger(viewChanger)
 
-		node.LeaderId = "" // no-one is leader
+		node.ViewData.LeaderId = "" // no-one is leader
 		sender.EXPECT().Broadcast("GetStatus", gomock.Any()).Times(1)
 		sender.EXPECT().Broadcast("Prepare", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().Broadcast("Commit", gomock.Any()).Times(checkpointInterval)
@@ -234,7 +234,7 @@ func TestNode_Run(t *testing.T) {
 		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
 		node.SetViewChanger(viewChanger)
 
-		node.LeaderId = "" // no-one is leader
+		node.ViewData.LeaderId = "" // no-one is leader
 		sender.EXPECT().Broadcast("GetStatus", gomock.Any()).Times(1)
 		sender.EXPECT().Broadcast("Prepare", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().Broadcast("Commit", gomock.Any()).Times(checkpointInterval)
@@ -280,7 +280,7 @@ func TestNode_Run(t *testing.T) {
 		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
 		node.SetViewChanger(viewChanger)
 
-		node.LeaderId = "" // no-one is leader
+		node.ViewData.LeaderId = "" // no-one is leader
 		sender.EXPECT().Broadcast("GetStatus", gomock.Any()).Times(1)
 		sender.EXPECT().Broadcast("Prepare", gomock.Any()).Times(numTransactions)
 		sender.EXPECT().Broadcast("Commit", gomock.Any()).Times(numTransactions)
@@ -295,10 +295,10 @@ func TestNode_Run(t *testing.T) {
 			wg.Done()
 		}()
 
-		messages := make([]proto.Message, 0, 7*numTransactions+numCheckpoints)
+		messages := make([]proto.Message, 0)
 		var mu sync.Mutex
 		var messagesWg sync.WaitGroup
-		messagesString := make([]string, 0, 7*numTransactions+numCheckpoints)
+		messagesString := make([]string, 0)
 		for i := range numTransactions {
 			txnId := i + 1
 			messagesWg.Add(1)
@@ -345,7 +345,7 @@ func TestNode_Run(t *testing.T) {
 			inputCh <- message
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		node.Stop()
 		wg.Wait()
 

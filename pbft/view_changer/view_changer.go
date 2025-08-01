@@ -2,6 +2,7 @@ package view_changer
 
 import (
 	"maps"
+	"math"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -114,6 +115,7 @@ func (p *PbftViewChange) runTimer() {
 		case <-p.viewTimer.C:
 			p.inViewChange = true
 			viewId := p.viewId.Add(1)
+			p.leaderForView = ""
 			p.node.GoToViewChange()
 			p.startLeaderElection(viewId)
 			go p.voteViewChange(viewId)
@@ -147,11 +149,6 @@ func (p *PbftViewChange) handleViewChange(msg *pb.ViewChangeRequest) {
 }
 
 func (p *PbftViewChange) handleNewView(msg *pb.NewViewRequest) {
-	if msg.NewViewId < p.viewId.Load() {
-		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received new view request with old view")
-		return
-	}
-
 	p.viewId.Store(msg.NewViewId)
 	p.inViewChange = false
 	p.viewTimer.Reset(p.requestTimeout)
@@ -224,7 +221,7 @@ func (p *PbftViewChange) createPreprepareMessages(viewId int64) []*pb.PrePrepare
 
 func (p *PbftViewChange) startLeaderElection(viewId int64) {
 	// TODO: putting leaderIds in a map can avoid concurrency issues in view change
-	p.leaderElectionCh = make(chan string) // A new channel not to be confused with previous ongoing elections
+	p.leaderElectionCh = make(chan string, 1) // A new channel not to be confused with previous ongoing elections
 	p.leaderElection.FindLeaderForView(viewId, p.leaderElectionCh)
 	go func(viewId int64, leaderElectionCh chan string) {
 		leaderId := <-leaderElectionCh
@@ -273,11 +270,15 @@ func validatePrepareProof(preparedProof *pb.ViewChangePreparedMessage, seqNo int
 
 // Determine minSeq and maxSeq from all ViewChange messages
 func getSequenceRange(viewChanges map[string]*pb.ViewChangeRequest) (int64, int64) {
-	minSeq := int64(0)
+	if len(viewChanges) == 0 {
+		log.Fatal("now view change for sequence range")
+	}
+
+	minSeq := int64(math.MaxInt64)
 	maxSeq := int64(0)
 
 	for _, viewChange := range viewChanges {
-		if viewChange.LastStableSequenceNumber > minSeq {
+		if viewChange.LastStableSequenceNumber < minSeq {
 			minSeq = viewChange.LastStableSequenceNumber
 		}
 		if viewChange.LastStableSequenceNumber > maxSeq {
