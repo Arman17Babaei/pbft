@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/Arman17Babaei/pbft/pbft/configs"
-	"github.com/Arman17Babaei/pbft/pbft/leader_election"
+	"github.com/Arman17Babaei/pbft/pbft/leader_election/roundrobin"
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -70,7 +70,7 @@ func NewNode(
 	disableCh <-chan any,
 	store *Store,
 ) *Node {
-	leaderElection := leader_election.NewRoundRobinLeaderElection(config)
+	leaderElection := roundrobin.NewLeaderElection(config)
 	return &Node{
 		config:    config,
 		sender:    sender,

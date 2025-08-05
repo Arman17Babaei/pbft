@@ -1,13 +1,9 @@
 package paxos
 
-//go:generate mockgen -source=paxos.go -destination=paxos_mock.go -package=paxos
-
-import "github.com/Arman17Babaei/pbft/pbft/configs"
-
-// Paxos Election Strategy (Through 1 Paxos Instance):
-// 1. First timeout node broadcast Being-Leader Request
-// 2. Acceptor return vote for Being-Leader Request
-// 3. Receiving majority's vote ([m/2] + 1),
+import (
+	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"google.golang.org/protobuf/proto"
+)
 
 type Node interface {
 	GetLastStableCheckPoint()
@@ -16,16 +12,49 @@ type Node interface {
 type PaxosElection struct {
 	config *configs.Config
 	node   Node
+	sender *Sender
+	// 你可以根据需要添加更多状态字段
 }
 
-func NewPaxosElection(config *configs.Config, node Node) *PaxosElection {
+func NewPaxosElection(config *configs.Config, node Node, sender *Sender) *PaxosElection {
 	return &PaxosElection{
 		config: config,
 		node:   node,
+		sender: sender,
 	}
 }
 
-func (r *PaxosElection) FindLeaderForView(viewId int64, callbackCh chan string) {
-	// length of the chain
-	// start vote -> RequestVote
+// 实现接口方法
+func (p *PaxosElection) GetLeader() string {
+	// 返回当前已选出的leader
+	return "" // TODO: 实现
+}
+
+func (p *PaxosElection) FindLeaderForView(viewId int64, callbackCh chan string) {
+	// TODO: 实现Paxos选主流程
+}
+
+func (p *PaxosElection) Start() error {
+	// 启动Paxos选举服务
+	return nil
+}
+
+func (p *PaxosElection) Stop() error {
+	// 停止Paxos选举服务
+	return nil
+}
+
+func (p *PaxosElection) HandleMessage(msg proto.Message) error {
+	// 处理Paxos相关消息
+	return nil
+}
+
+func (p *PaxosElection) GetCurrentLeader() string {
+	// 返回当前leader
+	return ""
+}
+
+func (p *PaxosElection) IsLeader() bool {
+	// 判断自己是否是leader
+	return false
 }

@@ -13,8 +13,8 @@ type RaftElection struct {
 	node   Node
 }
 
-func NewRaftElection(config *configs.Config, node Node) *RaftElection {
-	
+func NewLeaderElection(config *configs.Config, node Node) *RaftElection {
+
 	return &RaftElection{
 		config: config,
 		node:   node,
