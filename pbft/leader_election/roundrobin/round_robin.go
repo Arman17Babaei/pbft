@@ -1,4 +1,4 @@
-package leader_election
+package roundrobin
 
 import (
 	"slices"
@@ -13,7 +13,7 @@ type RoundRobin struct {
 	ViewChanges map[int64]map[string]*pb.ViewChangeRequest
 }
 
-func NewRoundRobinLeaderElection(config *configs.Config) *RoundRobin {
+func NewLeaderElection(config *configs.Config) *RoundRobin {
 	leaderIds := make([]string, 0)
 	for id := range config.PeersAddress {
 		leaderIds = append(leaderIds, id)
