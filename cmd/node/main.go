@@ -131,5 +131,6 @@ func startServices(config configs.Config, channels nodeChannels,
 	go viewChanger.Run(channels.viewChange)
 	go service.Serve()
 	go viewChangeService.Serve()
+	go viewChanger.LeaderElectionServe()
 	go monitoring.ServeMetrics(&config)
 }

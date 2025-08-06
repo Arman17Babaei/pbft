@@ -16,6 +16,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Sender handles outgoing Paxos election messages to other nodes
+// It manages gRPC connections and provides methods to send Paxos protocol messages
 type Sender struct {
 	mu          *sync.RWMutex
 	config      *configs.Config
@@ -25,6 +27,8 @@ type Sender struct {
 	pool        *ants.Pool
 }
 
+// NewSender creates a new Paxos election sender
+// It establishes gRPC connections to all other nodes on port + 2000
 func NewSender(config *configs.Config) *Sender {
 	pool, err := ants.NewPool(config.Grpc.MaxConcurrentStreams, ants.WithPreAlloc(true))
 	if err != nil {
@@ -37,6 +41,7 @@ func NewSender(config *configs.Config) *Sender {
 			continue
 		}
 
+		// Connect to port + 2000 for election service
 		c, err := grpc.NewClient(
 			fmt.Sprintf("%s:%d", addr.Host, addr.Port+2000),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -60,6 +65,7 @@ func NewSender(config *configs.Config) *Sender {
 	}
 }
 
+// Broadcast sends a message to all other nodes
 func (s *Sender) Broadcast(method string, message proto.Message) {
 	log.WithField("method", method).Debug("broadcast paxos election message")
 	for id := range s.otherNodes {
@@ -67,6 +73,7 @@ func (s *Sender) Broadcast(method string, message proto.Message) {
 	}
 }
 
+// SendRPCToPeer sends a message to a specific peer with retry logic
 func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Message) {
 	go func() {
 		for i := 0; i < s.maxRetries; i++ {
@@ -81,6 +88,7 @@ func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Messa
 	}()
 }
 
+// sendRPCToPeer performs the actual gRPC call to a peer
 func (s *Sender) sendRPCToPeer(client pb.ElectionClient, method string, message proto.Message) error {
 	if client == nil {
 		log.Error("paxos election client is nil")
@@ -104,6 +112,11 @@ func (s *Sender) sendRPCToPeer(client pb.ElectionClient, method string, message 
 	case "PaxosLearn":
 		if _, err := client.PaxosLearn(ctx, message.(*pb.PaxosLearnRequest)); err != nil {
 			monitoring.ErrorCounter.WithLabelValues("paxos_sender", "SendRPCToPeer-PaxosLearn", err.Error()).Inc()
+			return err
+		}
+	case "GetElectionStatus":
+		if _, err := client.GetElectionStatus(ctx, message.(*pb.ElectionStatusRequest)); err != nil {
+			monitoring.ErrorCounter.WithLabelValues("paxos_sender", "SendRPCToPeer-GetElectionStatus", err.Error()).Inc()
 			return err
 		}
 	default:

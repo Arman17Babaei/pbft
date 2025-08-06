@@ -130,14 +130,15 @@ func (l *LoadTest) Run() {
 }
 
 func startNode(id string) error {
-	homeDir, err := os.UserHomeDir()
+	// Assuming we run "go run xxx/xxx/main.go" at the root of the project
+	baseDir, err := os.Getwd()
 	if err != nil {
 		return err
 	}
 
 	cmd := exec.Command(
-		"/usr/local/go/bin/go",
-		"run", homeDir+"/github.com/125748147/pbft/cmd/node/main.go",
+		"go", "run",
+		baseDir+"/cmd/node/main.go",
 		"--id", id)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
