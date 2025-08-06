@@ -569,3 +569,11 @@ func (n *Node) sequenceInWaterMark(sequenceNumber int64) bool {
 
 	return true
 }
+
+func (n *Node) GetCurrentView() int64 {
+	return n.ViewData.CurrentView
+}
+
+func (n *Node) GetCurrentViewLeader() string {
+	return n.ViewData.LeaderId
+}
