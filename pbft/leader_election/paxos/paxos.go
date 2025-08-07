@@ -53,8 +53,10 @@ type PaxosElection struct {
 	electionTimer   *time.Timer
 
 	// Response tracking
-	prepareRequests map[int64]map[string]*pb.PaxosPrepareRequest
-	acceptRequests  map[int64]map[string]*pb.PaxosAcceptRequest
+	prepareRequests  map[int64]map[string]*pb.PaxosPrepareRequest
+	promiseResponses map[int64]map[string]*pb.PaxosPromiseRequest
+	acceptRequests   map[int64]map[string]*pb.PaxosAcceptRequest
+	successRequests  map[int64]map[string]*pb.PaxosSuccessRequest
 }
 
 // NewPaxosElection creates a new Paxos election instance
@@ -78,14 +80,17 @@ func NewPaxosElection(config *configs.Config, node Node, sender *Sender) *PaxosE
 		NewLeader:        "",
 		isLeader:         false,
 		isCandidate:      false,
-		leaderElectionCh: make(chan string, 10),
+		NewLeaderCh:      make(chan string, 10),
+		leaderElectionCh: make(chan struct{}, 10),
 		stopCh:           make(chan struct{}),
 
 		electionTimeout: electionTimeout,
 		electionTimer:   time.NewTimer(electionTimeout),
 
-		prepareRequests: make(map[int64]map[string]*pb.PaxosPrepareRequest),
-		acceptRequests:  make(map[int64]map[string]*pb.PaxosAcceptRequest),
+		prepareRequests:  make(map[int64]map[string]*pb.PaxosPrepareRequest),
+		promiseResponses: make(map[int64]map[string]*pb.PaxosPromiseRequest),
+		acceptRequests:   make(map[int64]map[string]*pb.PaxosAcceptRequest),
+		successRequests:  make(map[int64]map[string]*pb.PaxosSuccessRequest),
 	}
 }
 
@@ -97,29 +102,8 @@ func (p *PaxosElection) UpdatePaxosElection(node Node) {
 	p.currentViewLeader = node.GetCurrentViewLeader()
 }
 
-// SetMessageChannel sets the channel for receiving Paxos messages
-func (p *PaxosElection) SetMessageChannel(paxosCh <-chan proto.Message) {
-	p.paxosCh = paxosCh
-}
-
-// Start begins the Paxos election process
-func (p *PaxosElection) Start() error {
-	log.WithField("node-id", p.config.Id).Info("Starting Paxos election")
-
-	// Start message handler loop
-	go p.runMessageHandler()
-
-	// Start election timeout handler
-	go p.runElectionManager()
-
-	return nil
-}
-
-// Stop halts the Paxos election process
-func (p *PaxosElection) Stop() error {
-	log.WithField("node-id", p.config.Id).Info("Stopping Paxos election")
-	close(p.stopCh)
-	return nil
+func (p *PaxosElection) StartElection() {
+	p.leaderElectionCh <- struct{}{}
 }
 
 // runMessageHandler processes incoming Paxos messages
@@ -136,22 +120,21 @@ func (p *PaxosElection) runMessageHandler() {
 
 // handleMessage routes different types of Paxos messages to appropriate handlers
 func (p *PaxosElection) handleMessage(msg proto.Message) {
+	// 1. Recording the time of the message
+	startTime := time.Now()
 	timer := monitoring.ResponseTimeSummary.WithLabelValues(p.config.Id, "paxos-message")
-	defer timer.ObserveDuration()
+	defer timer.Observe(time.Since(startTime).Seconds())
 
+	// 2. Routing the message to the appropriate handler
 	switch m := msg.(type) {
 	case *pb.PaxosPrepareRequest:
 		p.handlePrepareRequest(m)
-	case *pb.PaxosPrepareResponse:
-		p.handlePrepareResponse(m)
+	case *pb.PaxosPromiseRequest:
+		p.handlePromiseResponse(m)
 	case *pb.PaxosAcceptRequest:
 		p.handleAcceptRequest(m)
-	case *pb.PaxosAcceptResponse:
-		p.handleAcceptResponse(m)
-	case *pb.PaxosLearnRequest:
-		p.handleLearnRequest(m)
-	case *pb.ElectionStatusRequest:
-		p.handleStatusRequest(m)
+	case *pb.PaxosSuccessRequest:
+		p.handleSuccessResponse(m)
 	default:
 		log.WithField("message-type", fmt.Sprintf("%T", msg)).Warn("Unknown paxos message type")
 	}
@@ -165,133 +148,248 @@ func (p *PaxosElection) handlePrepareRequest(req *pb.PaxosPrepareRequest) {
 	log.WithField("node-id", p.config.Id).
 		WithField("term", req.Term).
 		WithField("proposal-id", req.ProposalId).
-		Debug("Handling prepare request")
+		Debug("Handling paxos-prepare request")
 
 	// Update term if request has higher term
 	if req.Term > p.currentTerm {
 		p.currentTerm = req.Term
 		p.isLeader = false
+		p.isCandidate = false
+	} else if req.Term < p.currentTerm {
+		// Reject prepare
+		response := &pb.PaxosPromiseRequest{
+			Term:                   p.currentTerm,
+			Promised:               false,
+			AcceptorId:             p.config.Id,
+			ViewId:                 p.currentView,
+			LastAcceptedProposalId: p.acceptedProposalId,
+			LastAcceptedValue:      p.acceptedValue,
+			Timestamp:              time.Now().Unix(),
+		}
+		p.sender.SendRPCToPeer(req.ProposerId, "PaxosPromise", response)
+
+		log.WithField("node-id", p.config.Id).
+			WithField("term", req.Term).
+			WithField("proposal-id", req.ProposalId).
+			Debug("Wrong Paxos-Prepare, Rejected")
+		return
 	}
 
 	// Accept prepare if proposal ID is higher
-	if req.ProposalId > p.acceptedProposalId {
-		p.acceptedProposalId = req.ProposalId
+	if req.ProposalId > p.maxProposalId {
+		p.maxProposalId = req.ProposalId
+
+		p.isLeader = false
+		p.isCandidate = false
 
 		// Send prepare response
-		response := &pb.PaxosPrepareResponse{
-			Term:               p.currentTerm,
-			Accepted:           true,
-			AcceptedProposalId: p.acceptedProposalId,
-			AcceptedValue:      p.acceptedValue,
-			VoterId:            p.config.Id,
+		response := &pb.PaxosPromiseRequest{
+			Term:                   p.currentTerm,
+			Promised:               true,
+			AcceptorId:             p.config.Id,
+			ViewId:                 p.currentView,
+			LastAcceptedProposalId: p.acceptedProposalId,
+			LastAcceptedValue:      p.acceptedValue,
+			Timestamp:              time.Now().Unix(),
 		}
 
-		p.sender.SendRPCToPeer(req.ProposerId, "PaxosPrepare", response)
+		if p.prepareRequests[p.currentTerm] == nil {
+			p.prepareRequests[p.currentTerm] = make(map[string]*pb.PaxosPrepareRequest)
+		}
+		p.prepareRequests[p.currentTerm][req.ProposerId] = req
+		p.sender.SendRPCToPeer(req.ProposerId, "PaxosPromise", response)
+
+		log.WithField("node-id", p.config.Id).
+			WithField("term", req.Term).
+			WithField("proposal-id", req.ProposalId).
+			Debug("Sending Paxos-Promise")
 	} else {
 		// Reject prepare
-		response := &pb.PaxosPrepareResponse{
-			Term:     p.currentTerm,
-			Accepted: false,
-			VoterId:  p.config.Id,
+		response := &pb.PaxosPromiseRequest{
+			Term:                   p.currentTerm,
+			Promised:               false,
+			AcceptorId:             p.config.Id,
+			ViewId:                 p.currentView,
+			LastAcceptedProposalId: p.acceptedProposalId,
+			LastAcceptedValue:      p.acceptedValue,
+			Timestamp:              time.Now().Unix(),
 		}
 
-		p.sender.SendRPCToPeer(req.ProposerId, "PaxosPrepare", response)
+		p.sender.SendRPCToPeer(req.ProposerId, "PaxosPromise", response)
+		log.WithField("node-id", p.config.Id).
+			WithField("term", req.Term).
+			WithField("proposal-id", req.ProposalId).
+			Debug("Sending Reject Paxos-Prepare")
 	}
 }
 
 // handlePrepareResponse processes Prepare phase responses
-func (p *PaxosElection) handlePrepareResponse(resp *pb.PaxosPromiseRequest) {
+func (p *PaxosElection) handlePromiseResponse(resp *pb.PaxosPromiseRequest) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	proposalId := p.proposalId
-	if p.prepareResponses[proposalId] == nil {
-		p.prepareResponses[proposalId] = make(map[string]*pb.PaxosPrepareResponse)
+	log.WithField("node-id", p.config.Id).
+		WithField("term", resp.Term).
+		Debug("Handling paxos-promise response")
+
+	// if node is not trying to be a leader or request is not for the current term
+	// skip the response
+	if p.currentTerm < resp.Term {
+		p.prepareRequests[p.currentTerm] = nil
+		p.currentTerm = resp.Term
+		p.isLeader = false
+		p.isCandidate = false
+
+		log.WithField("node-id", p.config.Id).
+			WithField("term", resp.Term).
+			Debug("Skip Wrong Paxos-Promise Response (Term is lower)")
+		return
 	}
 
-	p.prepareResponses[proposalId][resp.VoterId] = resp
+	if !p.isCandidate || p.currentTerm != resp.Term || !resp.Promised {
+		log.WithField("node-id", p.config.Id).
+			WithField("term", resp.Term).
+			Debug("Skip Wrong Paxos-Promise Response")
+		return
+	}
 
-	// Check if we have majority support
-	if len(p.prepareResponses[proposalId]) >= p.getMajority() {
-		acceptedCount := 0
-		var highestAcceptedValue string
-		var highestAcceptedProposalId int64
+	// Recording the response
+	if p.promiseResponses[p.currentTerm] == nil {
+		p.promiseResponses[p.currentTerm] = make(map[string]*pb.PaxosPromiseRequest)
+	}
 
-		for _, response := range p.prepareResponses[proposalId] {
-			if response.Accepted {
-				acceptedCount++
-				if response.AcceptedProposalId > highestAcceptedProposalId {
-					highestAcceptedProposalId = response.AcceptedProposalId
-					highestAcceptedValue = response.AcceptedValue
-				}
-			}
-		}
+	p.promiseResponses[p.currentTerm][resp.AcceptorId] = resp
 
-		if acceptedCount >= p.getMajority() {
-			// Proceed to Accept phase
-			p.startAcceptPhase(proposalId, highestAcceptedValue)
-		}
+	// if got majority of promise, start the accept phase
+	if len(p.promiseResponses[p.currentTerm]) >= p.getMajority() {
+		p.acceptedProposalId = p.maxProposalId
+		p.acceptedValue = p.config.Id
+
+		p.sender.Broadcast("PaxosAccept", &pb.PaxosAcceptRequest{
+			Term:          p.currentTerm,
+			ProposalId:    p.maxProposalId,
+			ProposerId:    p.config.Id,
+			ProposedValue: p.config.Id,
+			ViewId:        p.currentView,
+			Timestamp:     time.Now().Unix(),
+		})
+
+		log.WithField("node-id", p.config.Id).
+			WithField("term", p.currentTerm).
+			WithField("proposal-id", p.maxProposalId).
+			Debug("Broadcasting Paxos-Accept Request")
 	}
 }
 
 // handleAcceptRequest processes incoming Accept phase requests
 func (p *PaxosElection) handleAcceptRequest(req *pb.PaxosAcceptRequest) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	log.WithField("node-id", p.config.Id).
 		WithField("term", req.Term).
 		WithField("proposal-id", req.ProposalId).
 		Debug("Handling accept request")
 
-	// Update term if request has higher term
+	// 1. higer term request change the node to acceptor
 	if req.Term > p.currentTerm {
-		p.currentTerm = req.Term
+		p.isCandidate = false
 		p.isLeader = false
 	}
 
-	// Accept if proposal ID >= accepted proposal ID
-	if req.ProposalId >= p.acceptedProposalId {
-		p.acceptedProposalId = req.ProposalId
-		p.acceptedValue = req.LeaderId
+	// 2. if term is not the same, skip the request (As it does not go through the prepare-promise phase)
+	if req.Term != p.currentTerm {
+		log.WithField("node-id", p.config.Id).
+			WithField("term", req.Term).
+			WithField("proposal-id", req.ProposalId).
+			Debug("Wrong Accept Request, Rejected")
+		p.mu.Unlock()
+		return
+	}
 
-		// Send accept response
-		response := &pb.PaxosAcceptResponse{
-			Term:     p.currentTerm,
-			Accepted: true,
-			VoterId:  p.config.Id,
+	// Accept if proposal ID >= accepted proposal ID
+	if req.ProposalId >= p.acceptedProposalId || req.ProposalId == p.maxProposalId {
+		p.acceptedProposalId = req.ProposalId
+		p.acceptedValue = req.ProposedValue
+
+		// Send success response
+		response := &pb.PaxosSuccessRequest{
+			Term:       p.currentTerm,
+			Success:    true,
+			AcceptorId: p.config.Id,
+			ViewId:     p.currentView,
+			Timestamp:  time.Now().Unix(),
 		}
 
 		p.sender.SendRPCToPeer(req.ProposerId, "PaxosAccept", response)
+
+		log.WithField("node-id", p.config.Id).
+			WithField("term", req.Term).
+			WithField("proposal-id", req.ProposalId).
+			Debug("Sending Paxos-Success Response")
+
+		// Set the new leader
+		// p.NewLeader = req.ProposerId
+		p.mu.Unlock()
+
+		// // Wait and check whether the node is leader (Maybe other candidate also trying)
+		// time.Sleep(1 * time.Second)
+		// p.NewLeaderCh <- p.NewLeader
 	} else {
 		// Reject accept
-		response := &pb.PaxosAcceptResponse{
-			Term:     p.currentTerm,
-			Accepted: false,
-			VoterId:  p.config.Id,
+		response := &pb.PaxosSuccessRequest{
+			Term:       p.currentTerm,
+			Success:    false,
+			AcceptorId: p.config.Id,
+			ViewId:     p.currentView,
+			Timestamp:  time.Now().Unix(),
 		}
-
 		p.sender.SendRPCToPeer(req.ProposerId, "PaxosAccept", response)
+
+		log.WithField("node-id", p.config.Id).
+			WithField("term", req.Term).
+			WithField("proposal-id", req.ProposalId).
+			Debug("Rejecting Accept Request")
+		p.mu.Unlock()
 	}
 }
 
 // handleAcceptResponse processes Accept phase responses
-func (p *PaxosElection) handleAcceptResponse(resp *pb.PaxosAcceptResponse) {
+func (p *PaxosElection) handleSuccessResponse(resp *pb.PaxosSuccessRequest) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	proposalId := p.proposalId
-	if p.acceptResponses[proposalId] == nil {
-		p.acceptResponses[proposalId] = make(map[string]*pb.PaxosAcceptResponse)
+	log.WithField("node-id", p.config.Id).
+		WithField("term", resp.Term).
+		Debug("Handling accept request")
+
+	// if term is lower, skip the response and become acceptor
+	if p.currentTerm < resp.Term {
+		p.successRequests[p.currentTerm] = nil
+		p.currentTerm = resp.Term
+		p.isLeader = false
+		p.isCandidate = false
+
+		log.WithField("node-id", p.config.Id).
+			WithField("term", resp.Term).
+			Debug("Skip Wrong Paxos-Success Response (Term is lower)")
+		return
 	}
 
-	p.acceptResponses[proposalId][resp.VoterId] = resp
+	// skip wrong response
+	if !p.isCandidate || p.currentTerm != resp.Term || !resp.Success {
+		log.WithField("node-id", p.config.Id).
+			WithField("term", resp.Term).
+			Debug("Skip Wrong Paxos-Success Response")
+		return
+	}
+	p.successRequests[p.currentTerm][resp.AcceptorId] = resp
 
 	// Check if we have majority support
-	if len(p.acceptResponses[proposalId]) >= p.getMajority() {
+	// ToDo:
+	if len(p.successRequests[p.currentTerm]) >= p.getMajority() {
 		acceptedCount := 0
 
-		for _, response := range p.acceptResponses[proposalId] {
+		for _, response := range p.successRequests[proposalId] {
 			if response.Accepted {
 				acceptedCount++
 			}
@@ -304,18 +402,18 @@ func (p *PaxosElection) handleAcceptResponse(resp *pb.PaxosAcceptResponse) {
 	}
 }
 
-// handleStatusRequest processes election status requests
-func (p *PaxosElection) handleStatusRequest(req *pb.ElectionStatusRequest) {
-	response := &pb.ElectionStatusResponse{
-		CurrentTerm:   p.currentTerm,
-		CurrentLeader: p.currentLeader,
-		NodeState:     p.getNodeState(),
-		ViewId:        p.currentTerm, // Use term as view ID
-		LastHeartbeat: time.Now().Unix(),
-	}
+// // handleStatusRequest processes election status requests
+// func (p *PaxosElection) handleStatusRequest(req *pb.ElectionStatusRequest) {
+// 	response := &pb.ElectionStatusResponse{
+// 		CurrentTerm:   p.currentTerm,
+// 		CurrentLeader: p.currentLeader,
+// 		NodeState:     p.getNodeState(),
+// 		ViewId:        p.currentTerm, // Use term as view ID
+// 		LastHeartbeat: time.Now().Unix(),
+// 	}
 
-	p.sender.SendRPCToPeer(req.NodeId, "GetElectionStatus", response)
-}
+// 	p.sender.SendRPCToPeer(req.NodeId, "GetElectionStatus", response)
+// }
 
 // startElection initiates a new election round
 func (p *PaxosElection) startElection() {
@@ -351,27 +449,14 @@ func (p *PaxosElection) startPreparePhase(proposalId int64) {
 // startAcceptPhase initiates the Accept phase
 func (p *PaxosElection) startAcceptPhase(proposalId int64, value string) {
 	request := &pb.PaxosAcceptRequest{
-		Term:       p.currentTerm,
-		ProposalId: proposalId,
-		ProposerId: p.config.Id,
-		ViewId:     p.currentTerm,
-		LeaderId:   value,
+		Term:        p.currentTerm,
+		ProposalId:  proposalId,
+		ProposerId:  p.config.Id,
+		ViewId:      p.currentTerm,
+		NewLeaderId: value,
 	}
 
 	p.sender.Broadcast("PaxosAccept", request)
-}
-
-// startLearnPhase initiates the Learn phase
-func (p *PaxosElection) startLearnPhase(proposalId int64) {
-	request := &pb.PaxosLearnRequest{
-		Term:       p.currentTerm,
-		ProposalId: proposalId,
-		ProposerId: p.config.Id,
-		ViewId:     p.currentTerm,
-		LeaderId:   p.acceptedValue,
-	}
-
-	p.sender.Broadcast("PaxosLearn", request)
 }
 
 // runElectionTimer handles election timeouts
@@ -440,5 +525,29 @@ func (p *PaxosElection) IsLeader() bool {
 func (p *PaxosElection) HandleMessage(msg proto.Message) error {
 	// This method is called by external components to handle messages
 	p.handleMessage(msg)
+	return nil
+}
+
+func (p *PaxosElection) Serve() error {
+	return p.Start()
+}
+
+// Start begins the Paxos election process
+func (p *PaxosElection) Start() error {
+	log.WithField("node-id", p.config.Id).Info("Starting Paxos election")
+
+	// Start message handler loop
+	go p.runMessageHandler()
+
+	// Start election timeout handler
+	go p.runElectionManager()
+
+	return nil
+}
+
+// Stop halts the Paxos election process
+func (p *PaxosElection) Stop() error {
+	log.WithField("node-id", p.config.Id).Info("Stopping Paxos election")
+	p.stopCh <- struct{}{}
 	return nil
 }

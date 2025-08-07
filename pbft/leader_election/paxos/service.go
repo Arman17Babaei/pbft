@@ -14,21 +14,22 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Service represents the gRPC server for Paxos election protocol
-// It handles incoming Paxos messages and forwards them to the election logic
+// proto:
+// UnimplementedPaxosServer
+// RegisterPaxosServer
+
 type Service struct {
-	config     *configs.Config
+	config *configs.Config
+
+	Enabled bool
+
 	paxosCh    chan<- proto.Message
 	listener   net.Listener
 	grpcServer *grpc.Server
 
-	Enabled bool
-
-	pb.UnimplementedElectionServer
+	pb.UnimplementedPaxosElectionServer
 }
 
-// NewService creates a new Paxos election service
-// It listens on port + 2000 (following the pattern: main port + 1000 for view change, + 2000 for election)
 func NewService(paxosCh chan<- proto.Message, config *configs.Config) *Service {
 	service := &Service{
 		config:  config,
@@ -37,112 +38,132 @@ func NewService(paxosCh chan<- proto.Message, config *configs.Config) *Service {
 	}
 
 	var err error
-	// Listen on port + 2000 for election service
 	service.listener, err = net.Listen("tcp", fmt.Sprintf("%s:%d", config.Address.Host, config.Address.Port+2000))
 	if err != nil {
-		log.WithError(err).Fatal("failed to listen for paxos election service")
+		log.WithError(err).Fatal("failed to listen")
 	}
 
 	grpc.WithTransportCredentials(insecure.NewCredentials())
 	service.grpcServer = grpc.NewServer()
-	pb.RegisterElectionServer(service.grpcServer, service)
+	pb.RegisterPaxosElectionServer(service.grpcServer, service)
 
 	return service
 }
 
-// Serve starts the gRPC server for Paxos election
-func (s *Service) Serve() {
-	log.WithFields(log.Fields{
-		"host": s.config.Address.Host,
-		"port": s.config.Address.Port + 2000,
-	}).Printf("Starting paxos election gRPC server...")
-
-	if err := s.grpcServer.Serve(s.listener); err != nil {
-		log.WithError(err).Fatal("failed to serve paxos election")
-	}
-}
-
-// PaxosPrepare handles incoming Paxos Prepare phase requests
-func (s *Service) PaxosPrepare(_ context.Context, req *pb.PaxosPrepareRequest) (*pb.PaxosPrepareResponse, error) {
+// PaxosPrepare handles incoming Prepare requests from other nodes
+func (s *Service) PaxosPrepare(_ context.Context, req *pb.PaxosPrepareRequest) (*pb.Empty, error) {
 	if !s.Enabled {
-		return &pb.PaxosPrepareResponse{}, nil
+		return &pb.Empty{}, nil
 	}
 
 	log.WithField("my-id", s.config.Id).
 		WithField("term", req.Term).
 		WithField("proposal-id", req.ProposalId).
-		Info("paxos prepare request received")
+		WithField("proposer-id", req.ProposerId).
+		Debug("paxos prepare request received")
 
+	// Forward the request to the election logic
 	s.paxosCh <- req
 	monitoring.MessageCounter.WithLabelValues(req.GetProposerId(), s.config.Id, "paxos-prepare").Inc()
 
-	return &pb.PaxosPrepareResponse{}, nil
+	return &pb.Empty{}, nil
 }
 
-// PaxosAccept handles incoming Paxos Accept phase requests
-func (s *Service) PaxosAccept(_ context.Context, req *pb.PaxosAcceptRequest) (*pb.PaxosAcceptResponse, error) {
+// PaxosPromise handles incoming Promise requests from other nodes
+func (s *Service) PaxosPromise(_ context.Context, req *pb.PaxosPromiseRequest) (*pb.Empty, error) {
 	if !s.Enabled {
-		return &pb.PaxosAcceptResponse{}, nil
+		return &pb.Empty{}, nil
+	}
+
+	log.WithField("my-id", s.config.Id).
+		WithField("term", req.Term).
+		WithField("promised", req.Promised).
+		WithField("acceptor-id", req.AcceptorId).
+		Debug("paxos promise request received")
+
+	// Forward the request to the election logic
+	s.paxosCh <- req
+	monitoring.MessageCounter.WithLabelValues(req.GetAcceptorId(), s.config.Id, "paxos-promise").Inc()
+
+	return &pb.Empty{}, nil
+}
+
+// PaxosAccept handles incoming Accept requests from other nodes
+func (s *Service) PaxosAccept(_ context.Context, req *pb.PaxosAcceptRequest) (*pb.Empty, error) {
+	if !s.Enabled {
+		return &pb.Empty{}, nil
 	}
 
 	log.WithField("my-id", s.config.Id).
 		WithField("term", req.Term).
 		WithField("proposal-id", req.ProposalId).
-		Info("paxos accept request received")
+		WithField("proposer-id", req.ProposerId).
+		WithField("proposed-value", req.ProposedValue).
+		Debug("paxos accept request received")
 
+	// Forward the request to the election logic
 	s.paxosCh <- req
 	monitoring.MessageCounter.WithLabelValues(req.GetProposerId(), s.config.Id, "paxos-accept").Inc()
 
-	return &pb.PaxosAcceptResponse{}, nil
+	return &pb.Empty{}, nil
 }
 
-// PaxosLearn handles incoming Paxos Learn phase requests
-func (s *Service) PaxosLearn(_ context.Context, req *pb.PaxosLearnRequest) (*pb.PaxosLearnResponse, error) {
+// PaxosSuccess handles incoming Success requests from other nodes
+func (s *Service) PaxosSuccess(_ context.Context, req *pb.PaxosSuccessRequest) (*pb.Empty, error) {
 	if !s.Enabled {
-		return &pb.PaxosLearnResponse{}, nil
+		return &pb.Empty{}, nil
 	}
 
 	log.WithField("my-id", s.config.Id).
 		WithField("term", req.Term).
-		WithField("proposal-id", req.ProposalId).
-		Info("paxos learn request received")
+		WithField("success", req.Success).
+		WithField("acceptor-id", req.AcceptorId).
+		Debug("paxos success request received")
 
+	// Forward the request to the election logic
 	s.paxosCh <- req
-	monitoring.MessageCounter.WithLabelValues(req.GetProposerId(), s.config.Id, "paxos-learn").Inc()
+	monitoring.MessageCounter.WithLabelValues(req.GetAcceptorId(), s.config.Id, "paxos-success").Inc()
 
-	return &pb.PaxosLearnResponse{}, nil
+	return &pb.Empty{}, nil
 }
 
-// GetElectionStatus handles election status requests
-func (s *Service) GetElectionStatus(_ context.Context, req *pb.ElectionStatusRequest) (*pb.ElectionStatusResponse, error) {
+// GetElectionStatus returns the current election status
+func (s *Service) GetElectionStatus(_ context.Context, req *pb.ElectionStatusRequest) (*pb.Empty, error) {
 	if !s.Enabled {
-		return &pb.ElectionStatusResponse{}, nil
+		return &pb.Empty{}, nil
 	}
 
 	log.WithField("my-id", s.config.Id).
-		WithField("request-from", req.NodeId).
-		Info("election status request received")
+		WithField("requesting-node", req.NodeId).
+		Debug("election status request received")
 
-	s.paxosCh <- req
-	monitoring.MessageCounter.WithLabelValues(req.GetNodeId(), s.config.Id, "election-status").Inc()
-
-	return &pb.ElectionStatusResponse{}, nil
+	return &pb.Empty{}, nil
 }
 
 // Enable enables the election service
-func (s *Service) Enable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
-	log.WithField("my-id", s.config.Id).Info("enable paxos election request received")
+func (s *Service) Enable(_ context.Context, _ *pb.Empty) (*pb.Empty, error) {
 	s.Enabled = true
-	monitoring.MessageCounter.WithLabelValues("admin", s.config.Id, "enable-election").Inc()
-
+	log.WithField("my-id", s.config.Id).Info("paxos election service enabled")
 	return &pb.Empty{}, nil
 }
 
 // Disable disables the election service
-func (s *Service) Disable(_ context.Context, req *pb.Empty) (*pb.Empty, error) {
-	log.WithField("my-id", s.config.Id).Info("disable paxos election request received")
+func (s *Service) Disable(_ context.Context, _ *pb.Empty) (*pb.Empty, error) {
 	s.Enabled = false
-	monitoring.MessageCounter.WithLabelValues("admin", s.config.Id, "disable-election").Inc()
-
+	log.WithField("my-id", s.config.Id).Info("paxos election service disabled")
 	return &pb.Empty{}, nil
+}
+
+func (s *Service) Serve() {
+	log.WithFields(log.Fields{"host": s.config.Address.Host, "port": s.config.Address.Port + 1000}).Printf("Starting view change gRPC server...")
+	if err := s.grpcServer.Serve(s.listener); err != nil {
+		log.WithError(err).Fatal("failed to serve")
+	}
+}
+
+func (s *Service) Stop() {
+	s.grpcServer.GracefulStop()
+	s.listener.Close()
+	close(s.paxosCh) // Maybe Not Needed
+	log.Info("paxos service stopped")
 }
