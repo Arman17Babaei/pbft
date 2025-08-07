@@ -2,6 +2,7 @@ package paxos
 
 import (
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -62,6 +63,9 @@ type PaxosElection struct {
 // NewPaxosElection creates a new Paxos election instance
 func NewPaxosElection(config *configs.Config, node Node, sender *Sender) *PaxosElection {
 	electionTimeout := time.Duration(config.Timers.ViewChangeTimeoutMs) * time.Millisecond
+
+	// 初始化随机数种子
+	rand.Seed(time.Now().UnixNano())
 
 	return &PaxosElection{
 		config: config,
@@ -356,7 +360,6 @@ func (p *PaxosElection) handleAcceptRequest(req *pb.PaxosAcceptRequest) {
 // handleAcceptResponse processes Accept phase responses
 func (p *PaxosElection) handleSuccessResponse(resp *pb.PaxosSuccessRequest) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	log.WithField("node-id", p.config.Id).
 		WithField("term", resp.Term).
@@ -372,6 +375,7 @@ func (p *PaxosElection) handleSuccessResponse(resp *pb.PaxosSuccessRequest) {
 		log.WithField("node-id", p.config.Id).
 			WithField("term", resp.Term).
 			Debug("Skip Wrong Paxos-Success Response (Term is lower)")
+		p.mu.Unlock()
 		return
 	}
 
@@ -380,24 +384,39 @@ func (p *PaxosElection) handleSuccessResponse(resp *pb.PaxosSuccessRequest) {
 		log.WithField("node-id", p.config.Id).
 			WithField("term", resp.Term).
 			Debug("Skip Wrong Paxos-Success Response")
+		p.mu.Unlock()
 		return
 	}
 	p.successRequests[p.currentTerm][resp.AcceptorId] = resp
+	p.mu.Unlock()
 
 	// Check if we have majority support
-	// ToDo:
-	if len(p.successRequests[p.currentTerm]) >= p.getMajority() {
-		acceptedCount := 0
 
-		for _, response := range p.successRequests[proposalId] {
-			if response.Accepted {
-				acceptedCount++
-			}
-		}
+	if p.isCandidate && len(p.successRequests[p.currentTerm]) >= p.getMajority() {
+		waitTime := time.Duration(rand.Intn(3000-1000+1)+1000) * time.Millisecond
+		log.WithField("node-id", p.config.Id).
+			WithField("wait-time", waitTime).
+			Info("Waiting before becoming leader")
 
-		if acceptedCount >= p.getMajority() {
-			// Proceed to Learn phase
-			p.startLearnPhase(proposalId)
+		// Random wait 1~3 seconds before becoming leader
+		// Wait for other candidates to finish the election race
+		time.Sleep(waitTime)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.isCandidate && len(p.successRequests[p.currentTerm]) >= p.getMajority() {
+			log.WithField("node-id", p.config.Id).
+				WithField("term", resp.Term).
+				Debug("Becoming leader")
+			p.NewLeader = p.config.Id
+			p.isLeader = true
+			p.isCandidate = false
+			p.NewLeaderCh <- p.config.Id
+		} else {
+			log.WithField("node-id", p.config.Id).
+				WithField("term", resp.Term).
+				Debug("Not a new leader")
+			p.isCandidate = false
+			p.isLeader = false
 		}
 	}
 }
@@ -419,7 +438,6 @@ func (p *PaxosElection) handleSuccessResponse(resp *pb.PaxosSuccessRequest) {
 func (p *PaxosElection) startElection() {
 	p.mu.Lock()
 	p.currentTerm++
-	p.proposalId = p.generateProposalId()
 	p.isLeader = false
 	p.mu.Unlock()
 
@@ -429,34 +447,27 @@ func (p *PaxosElection) startElection() {
 		Info("Starting new election")
 
 	// Send Prepare requests
-	p.startPreparePhase(p.proposalId)
+	p.startPreparePhase()
 }
 
 // startPreparePhase initiates the Prepare phase
-func (p *PaxosElection) startPreparePhase(proposalId int64) {
+func (p *PaxosElection) startPreparePhase() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.isCandidate = true
+	p.isLeader = false
+	p.proposalId = p.generateProposalId()
+
 	request := &pb.PaxosPrepareRequest{
-		Term:                   p.currentTerm,
-		ProposalId:             proposalId,
-		ProposerId:             p.config.Id,
-		ViewId:                 p.currentTerm,
-		LastAcceptedProposalId: p.acceptedProposalId,
-		LastAcceptedValue:      p.acceptedValue,
+		Term:       p.currentTerm,
+		ProposalId: p.proposalId,
+		ProposerId: p.config.Id,
+		ViewId:     p.currentView,
+		Timestamp:  time.Now().Unix(),
 	}
 
 	p.sender.Broadcast("PaxosPrepare", request)
-}
-
-// startAcceptPhase initiates the Accept phase
-func (p *PaxosElection) startAcceptPhase(proposalId int64, value string) {
-	request := &pb.PaxosAcceptRequest{
-		Term:        p.currentTerm,
-		ProposalId:  proposalId,
-		ProposerId:  p.config.Id,
-		ViewId:      p.currentTerm,
-		NewLeaderId: value,
-	}
-
-	p.sender.Broadcast("PaxosAccept", request)
 }
 
 // runElectionTimer handles election timeouts
