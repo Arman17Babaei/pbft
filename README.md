@@ -2,10 +2,8 @@
 
 ## Execution
 ```
-cd proto
-protoc --go_out=. --go-grpc_out=. pbft.proto
-cd ..
-go run cmd/node/main.go --cluster
+./compile-protos.sh
+go run github.com/Arman17Babaei/pbft/cmd/load_test
 ```
 
 ## Monitoring

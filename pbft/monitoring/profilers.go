@@ -55,3 +55,17 @@ var ClientRequestLatencySummary = promauto.NewSummaryVec(
 	},
 	[]string{"node"},
 )
+
+var ErrorCounter = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "error_count",
+	},
+	[]string{"component", "step", "error"},
+)
+
+var LeaderCounter = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "leader_counter",
+	},
+	[]string{"node_id", "leader_id"},
+)

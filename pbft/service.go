@@ -3,9 +3,10 @@ package pbft
 import (
 	"context"
 	"fmt"
+	"net"
+
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
-	"net"
 
 	log "github.com/sirupsen/logrus"
 
@@ -119,30 +120,6 @@ func (s *Service) Checkpoint(_ context.Context, req *pb.CheckpointRequest) (*pb.
 	log.WithField("my-id", s.config.Id).WithField("request", req).Info("checkpoint request received")
 	s.inputCh <- req
 	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "checkpoint").Inc()
-
-	return &pb.Empty{}, nil
-}
-
-func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.Empty, error) {
-	if !s.Enabled {
-		return &pb.Empty{}, nil
-	}
-
-	log.WithField("my-id", s.config.Id).WithField("niew-view", req.GetNewViewId()).Info("view-change request received")
-	s.inputCh <- req
-	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "view-change").Inc()
-
-	return &pb.Empty{}, nil
-}
-
-func (s *Service) NewView(_ context.Context, req *pb.NewViewRequest) (*pb.Empty, error) {
-	if !s.Enabled {
-		return &pb.Empty{}, nil
-	}
-
-	log.WithField("my-id", s.config.Id).WithField("new-view-id", req.NewViewId).WithField("leader-id", req.ReplicaId).Info("new-view request received")
-	s.inputCh <- req
-	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "new-view").Inc()
 
 	return &pb.Empty{}, nil
 }

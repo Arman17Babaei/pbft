@@ -2,15 +2,15 @@ package pbft
 
 import (
 	"fmt"
+	"sync"
+	"testing"
+	"time"
+
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/proto"
-	"strings"
-	"sync"
-	"testing"
-	"time"
 )
 
 func TestNode_Run(t *testing.T) {
@@ -42,7 +42,10 @@ func TestNode_Run(t *testing.T) {
 
 	t.Run("initiate preprepare on request init", func(t *testing.T) {
 		sender := NewMockISender(ctrl)
-		_, requestCh, _, _, node := NewMockNode(sender, config)
+		viewChanger := NewMockViewChanger(ctrl)
+		_, requestCh, _, _, node := NewMockNode(sender, config, ctrl)
+		node.SetViewChanger(viewChanger)
+
 		request := newRequest()
 		preprepareRequest := &pb.PrePrepareRequest{
 			ViewId:         0,
@@ -71,13 +74,16 @@ func TestNode_Run(t *testing.T) {
 		node.Stop()
 		wg.Wait()
 
-		assert.Equal(t, node.Preprepares[1], preprepareRequest)
+		assert.Equal(t, node.ViewData.Preprepares[1], preprepareRequest)
 	})
 
 	t.Run("initiate prepare on preprepare for backup", func(t *testing.T) {
 		sender := NewMockISender(ctrl)
-		inputCh, _, _, _, node := NewMockNode(sender, config)
-		node.LeaderId = "" // no-one is leader
+		viewChanger := NewMockViewChanger(ctrl)
+		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
+		node.SetViewChanger(viewChanger)
+
+		node.ViewData.LeaderId = "" // no-one is leader
 		request := newRequest()
 		preprepareMessage := &pb.PiggyBackedPrePareRequest{
 			PrePrepareRequest: &pb.PrePrepareRequest{
@@ -115,8 +121,11 @@ func TestNode_Run(t *testing.T) {
 
 	t.Run("initiate prepare on preprepare for leader", func(t *testing.T) {
 		sender := NewMockISender(ctrl)
-		inputCh, _, _, _, node := NewMockNode(sender, config)
-		node.LeaderId = config.Id // is leader
+		viewChanger := NewMockViewChanger(ctrl)
+		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
+		node.SetViewChanger(viewChanger)
+
+		node.ViewData.LeaderId = config.Id // is leader
 		request := newRequest()
 		preprepareMessage := &pb.PiggyBackedPrePareRequest{
 			PrePrepareRequest: &pb.PrePrepareRequest{
@@ -143,8 +152,11 @@ func TestNode_Run(t *testing.T) {
 
 	t.Run("initiate commit on prepare for backup", func(t *testing.T) {
 		sender := NewMockISender(ctrl)
-		inputCh, _, _, _, node := NewMockNode(sender, config)
-		node.LeaderId = "" // no-one is leader
+		viewChanger := NewMockViewChanger(ctrl)
+		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
+		node.SetViewChanger(viewChanger)
+
+		node.ViewData.LeaderId = "" // no-one is leader
 		request := newRequest()
 		preprepareMessage := &pb.PiggyBackedPrePareRequest{
 			PrePrepareRequest: &pb.PrePrepareRequest{
@@ -180,13 +192,17 @@ func TestNode_Run(t *testing.T) {
 
 	t.Run("initiate checkpoint on commit for backup", func(t *testing.T) {
 		sender := NewMockISender(ctrl)
-		inputCh, _, _, _, node := NewMockNode(sender, config)
-		node.LeaderId = "" // no-one is leader
+		viewChanger := NewMockViewChanger(ctrl)
+		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
+		node.SetViewChanger(viewChanger)
+
+		node.ViewData.LeaderId = "" // no-one is leader
 		sender.EXPECT().Broadcast("GetStatus", gomock.Any()).Times(1)
 		sender.EXPECT().Broadcast("Prepare", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().Broadcast("Commit", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().SendRPCToClient(gomock.Any(), "Response", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().Broadcast("Checkpoint", gomock.Any()).Times(1)
+		viewChanger.EXPECT().RequestExecuted(int64(0)).Times(checkpointInterval)
 
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -214,13 +230,17 @@ func TestNode_Run(t *testing.T) {
 
 	t.Run("stabilizing checkpoint", func(t *testing.T) {
 		sender := NewMockISender(ctrl)
-		inputCh, _, _, _, node := NewMockNode(sender, config)
-		node.LeaderId = "" // no-one is leader
+		viewChanger := NewMockViewChanger(ctrl)
+		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
+		node.SetViewChanger(viewChanger)
+
+		node.ViewData.LeaderId = "" // no-one is leader
 		sender.EXPECT().Broadcast("GetStatus", gomock.Any()).Times(1)
 		sender.EXPECT().Broadcast("Prepare", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().Broadcast("Commit", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().SendRPCToClient(gomock.Any(), "Response", gomock.Any()).Times(checkpointInterval)
 		sender.EXPECT().Broadcast("Checkpoint", gomock.Any()).Times(1)
+		viewChanger.EXPECT().RequestExecuted(int64(0)).Times(checkpointInterval)
 
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -247,7 +267,7 @@ func TestNode_Run(t *testing.T) {
 		node.Stop()
 		wg.Wait()
 
-		assert.Equal(t, checkpointInterval, int(node.Store.GetLastStableSequenceNumber()))
+		assert.Equal(t, checkpointInterval, int(node.Store.GetLastStableCheckpoint().GetSequenceNumber()))
 	})
 
 	t.Run("stabilizing many checkpoints", func(t *testing.T) {
@@ -256,13 +276,17 @@ func TestNode_Run(t *testing.T) {
 		numTransactions := numCheckpoints * checkpointInterval
 
 		sender := NewMockISender(ctrl)
-		inputCh, _, _, _, node := NewMockNode(sender, config)
-		node.LeaderId = "" // no-one is leader
+		viewChanger := NewMockViewChanger(ctrl)
+		inputCh, _, _, _, node := NewMockNode(sender, config, ctrl)
+		node.SetViewChanger(viewChanger)
+
+		node.ViewData.LeaderId = "" // no-one is leader
 		sender.EXPECT().Broadcast("GetStatus", gomock.Any()).Times(1)
 		sender.EXPECT().Broadcast("Prepare", gomock.Any()).Times(numTransactions)
 		sender.EXPECT().Broadcast("Commit", gomock.Any()).Times(numTransactions)
 		sender.EXPECT().SendRPCToClient(gomock.Any(), "Response", gomock.Any()).Times(numTransactions)
 		sender.EXPECT().Broadcast("Checkpoint", gomock.Any()).Times(numCheckpoints)
+		viewChanger.EXPECT().RequestExecuted(int64(0)).Times(numTransactions)
 
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -271,10 +295,10 @@ func TestNode_Run(t *testing.T) {
 			wg.Done()
 		}()
 
-		messages := make([]proto.Message, 0, 7*numTransactions+numCheckpoints)
+		messages := make([]proto.Message, 0)
 		var mu sync.Mutex
 		var messagesWg sync.WaitGroup
-		messagesString := make([]string, 0, 7*numTransactions+numCheckpoints)
+		messagesString := make([]string, 0)
 		for i := range numTransactions {
 			txnId := i + 1
 			messagesWg.Add(1)
@@ -321,13 +345,11 @@ func TestNode_Run(t *testing.T) {
 			inputCh <- message
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		node.Stop()
 		wg.Wait()
 
-		fmt.Println(strings.Join(messagesString, ", "))
-
-		assert.Equal(t, numTransactions, int(node.Store.GetLastStableSequenceNumber()))
+		assert.Equal(t, numTransactions, int(node.Store.GetLastStableCheckpoint().GetSequenceNumber()))
 	})
 }
 
@@ -380,10 +402,16 @@ func newRequest() *pb.ClientRequest {
 	}
 }
 
-func NewMockNode(sender ISender, config *configs.Config) (chan proto.Message, chan *pb.ClientRequest, chan any, chan any, *Node) {
+func NewMockNode(sender ISender, config *configs.Config, ctrl *gomock.Controller) (chan proto.Message, chan *pb.ClientRequest, chan any, chan any, *Node) {
 	inputCh := make(chan proto.Message, 5)
 	requestCh := make(chan *pb.ClientRequest, 5)
 	enableCh := make(chan any)
 	disableCh := make(chan any)
-	return inputCh, requestCh, enableCh, disableCh, NewNode(config, sender, inputCh, requestCh, enableCh, disableCh)
+	store := NewStore(config)
+	node := NewNode(config, sender, inputCh, requestCh, enableCh, disableCh, store)
+
+	mockViewChanger := NewMockViewChanger(ctrl)
+	node.SetViewChanger(mockViewChanger)
+
+	return inputCh, requestCh, enableCh, disableCh, node
 }

@@ -5,6 +5,7 @@ import (
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	pb "github.com/Arman17Babaei/pbft/proto"
@@ -12,7 +13,24 @@ import (
 )
 
 type CheckpointProof struct {
+	mu    sync.RWMutex
 	proof []*pb.CheckpointRequest
+}
+
+func (cpp *CheckpointProof) GetSequenceNumber() int64 {
+	if cpp == nil {
+		return 0
+	}
+
+	return cpp.proof[0].SequenceNumber
+}
+
+func (cpp *CheckpointProof) GetProof() []*pb.CheckpointRequest {
+	if cpp == nil {
+		return []*pb.CheckpointRequest{}
+	}
+
+	return cpp.proof
 }
 
 type CheckpointId struct {
@@ -25,6 +43,7 @@ type State struct {
 }
 
 type Store struct {
+	mu                        sync.RWMutex
 	config                    *configs.Config
 	unstableCheckpoints       map[CheckpointId]*CheckpointProof
 	lastStableCheckpoint      *CheckpointProof
@@ -46,42 +65,28 @@ func NewStore(config *configs.Config) *Store {
 	}
 }
 
-func NewCheckpointId(checkpoint *pb.CheckpointRequest) CheckpointId {
-	return CheckpointId{
-		sequenceNumber: checkpoint.SequenceNumber,
-		digest:         string(checkpoint.StateDigest),
-	}
-}
-
-func (s *Store) GetLastStableSequenceNumber() int64 {
-	if s.lastStableCheckpoint == nil {
-		return 0
-	}
-	return s.lastStableCheckpoint.proof[0].SequenceNumber
-}
-
-func (s *Store) GetLastStableCheckpoint() []*pb.CheckpointRequest {
-	if s.lastStableCheckpoint == nil {
-		return []*pb.CheckpointRequest{}
-	}
-
-	return s.lastStableCheckpoint.proof
+func (s *Store) GetLastStableCheckpoint() *CheckpointProof {
+	return s.lastStableCheckpoint
 }
 
 func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointRequest) {
-	s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
-	s.lastAppliedSequenceNumber = checkpointProof[0].SequenceNumber
+	if s.lastStableCheckpoint == nil || s.lastStableCheckpoint.GetSequenceNumber() < checkpointProof[0].SequenceNumber {
+		s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
+	}
+	if s.lastAppliedSequenceNumber < checkpointProof[0].SequenceNumber {
+		s.lastAppliedSequenceNumber = checkpointProof[0].SequenceNumber
+	}
 }
 
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
 	log.WithField("checkpoint", checkpoint.String()).Debug("adding checkpoint request to store")
 
-	if checkpoint.SequenceNumber < s.GetLastStableSequenceNumber() {
+	if checkpoint.SequenceNumber < s.GetLastStableCheckpoint().GetSequenceNumber() {
 		log.WithField("checkpoint", checkpoint.String()).Warn("stale checkpoint")
 		return nil
 	}
 
-	id := NewCheckpointId(checkpoint)
+	id := newCheckpointId(checkpoint)
 	if _, ok := s.unstableCheckpoints[id]; !ok {
 		s.unstableCheckpoints[id] = &CheckpointProof{proof: []*pb.CheckpointRequest{}}
 	}
@@ -103,7 +108,6 @@ func (s *Store) AddRequests(sequenceNumber int64, reqs []*pb.ClientRequest) {
 
 func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.OperationResult, []*pb.CheckpointRequest) {
 	log.WithField("request", commit.String()).Debug("committing request")
-	//log.WithField("request", commit.GetSequenceNumber()).WithField("replica", s.config.Id).Error("committing request")
 
 	s.committedRequests[commit.SequenceNumber] = s.requests[commit.SequenceNumber]
 
@@ -125,7 +129,7 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 			log.WithField("seq-no", s.lastAppliedSequenceNumber+1).WithField("replica", s.config.Id).Info("created checkpoint for seq-no")
 			checkpoints = append(checkpoints, &pb.CheckpointRequest{
 				SequenceNumber: s.lastAppliedSequenceNumber + 1,
-				StateDigest:    []byte(s.state.Digest()),
+				StateDigest:    []byte(s.state.digest()),
 				ReplicaId:      s.config.Id,
 			})
 		}
@@ -134,11 +138,16 @@ func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.Ope
 	return reqs, results, checkpoints
 }
 
-func (s *State) Digest() string {
+func (s *State) digest() string {
 	return strconv.Itoa(s.value[""])
 }
 
 func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
+	if s.lastStableCheckpoint.GetSequenceNumber() >= checkpoint.proof[0].SequenceNumber {
+		log.WithField("checkpoint", checkpoint.proof[0].SequenceNumber).Debug("not stabilizing checkpoint")
+		return
+	}
+
 	log.WithField("checkpoint", checkpoint.proof[0].SequenceNumber).Debug("stabilizing checkpoint")
 	s.lastStableCheckpoint = checkpoint
 
@@ -172,7 +181,9 @@ func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
 		s.state.apply(&pb.Operation{Type: pb.Operation_ADD, Key: "", Value: string(checkpoint.proof[0].StateDigest)})
 	}
 
-	s.lastAppliedSequenceNumber = checkpoint.proof[0].SequenceNumber
+	if s.lastAppliedSequenceNumber < checkpoint.proof[0].SequenceNumber {
+		s.lastAppliedSequenceNumber = checkpoint.proof[0].SequenceNumber
+	}
 }
 
 func (s *State) apply(operation *pb.Operation) *pb.OperationResult {
@@ -202,5 +213,12 @@ func (s *State) apply(operation *pb.Operation) *pb.OperationResult {
 
 	return &pb.OperationResult{
 		Value: strconv.Itoa(s.value[operation.Key]),
+	}
+}
+
+func newCheckpointId(checkpoint *pb.CheckpointRequest) CheckpointId {
+	return CheckpointId{
+		sequenceNumber: checkpoint.SequenceNumber,
+		digest:         string(checkpoint.StateDigest),
 	}
 }
