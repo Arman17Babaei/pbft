@@ -1,5 +1,7 @@
 package paxos
 
+//go:generate mockgen -source=paxos.go -destination=paxos_mock.go -package=paxos
+
 import (
 	"fmt"
 	"math/rand"
