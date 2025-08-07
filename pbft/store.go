@@ -70,7 +70,7 @@ func (s *Store) GetLastStableCheckpoint() *CheckpointProof {
 }
 
 func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointRequest) {
-	if s.lastStableCheckpoint.GetSequenceNumber() < checkpointProof[0].SequenceNumber {
+	if s.lastStableCheckpoint == nil || s.lastStableCheckpoint.GetSequenceNumber() < checkpointProof[0].SequenceNumber {
 		s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
 	}
 	if s.lastAppliedSequenceNumber < checkpointProof[0].SequenceNumber {

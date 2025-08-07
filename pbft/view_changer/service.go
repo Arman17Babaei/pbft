@@ -57,7 +57,7 @@ func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.
 		return &pb.Empty{}, nil
 	}
 
-	log.WithField("my-id", s.config.Id).WithField("niew-view", req.GetNewViewId()).Info("view-change request received")
+	log.WithField("my-id", s.config.Id).WithField("new-view", req.GetNewViewId()).Info("view-change request received")
 	s.viewChangeCh <- req
 	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "view-change").Inc()
 

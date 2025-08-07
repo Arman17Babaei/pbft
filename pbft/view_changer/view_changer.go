@@ -243,7 +243,7 @@ func extractPreprepareRequests(viewChanges map[string]*pb.ViewChangeRequest, min
 			prePrepare := preparedProof.PrePrepareRequest
 			seqNo := prePrepare.SequenceNumber
 
-			if seqNo <= minSeq || validatePrepareProof(preparedProof, seqNo, prePrepare, f) {
+			if seqNo <= minSeq || !validatePrepareProof(preparedProof, seqNo, prePrepare, f) {
 				continue
 			}
 
@@ -264,14 +264,14 @@ func validatePrepareProof(preparedProof *pb.ViewChangePreparedMessage, seqNo int
 			replicaIDs[prepare.ReplicaId] = struct{}{}
 		}
 	}
-	hasValidPrepares := len(replicaIDs) < 2*f
+	hasValidPrepares := len(replicaIDs) >= 2*f
 	return hasValidPrepares
 }
 
 // Determine minSeq and maxSeq from all ViewChange messages
 func getSequenceRange(viewChanges map[string]*pb.ViewChangeRequest) (int64, int64) {
 	if len(viewChanges) == 0 {
-		log.Fatal("now view change for sequence range")
+		log.Fatal("no view change for sequence range")
 	}
 
 	minSeq := int64(math.MaxInt64)
