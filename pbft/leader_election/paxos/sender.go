@@ -9,120 +9,174 @@ import (
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	pb "github.com/Arman17Babaei/pbft/proto"
-	"github.com/panjf2000/ants/v2"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 )
 
-// Sender handles outgoing Paxos election messages to other nodes
-// It manages gRPC connections and provides methods to send Paxos protocol messages
 type Sender struct {
-	mu          *sync.RWMutex
-	config      *configs.Config
-	sendTimeout time.Duration
-	maxRetries  int
-	otherNodes  map[string]pb.ElectionClient
-	pool        *ants.Pool
+	config *configs.Config
+	conns  map[string]*grpc.ClientConn
+	mu     sync.RWMutex
 }
 
-// NewSender creates a new Paxos election sender
-// It establishes gRPC connections to all other nodes on port + 2000
+// proto:
+// PaxosClient
+// NewPaxosClient
+
 func NewSender(config *configs.Config) *Sender {
-	pool, err := ants.NewPool(config.Grpc.MaxConcurrentStreams, ants.WithPreAlloc(true))
-	if err != nil {
-		log.WithError(err).Fatal("failed to create paxos election pool")
-	}
-
-	electionClients := make(map[string]pb.ElectionClient)
-	for id, addr := range config.PeersAddress {
-		if id == config.Id {
-			continue
-		}
-
-		// Connect to port + 2000 for election service
-		c, err := grpc.NewClient(
-			fmt.Sprintf("%s:%d", addr.Host, addr.Port+2000),
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		)
-
-		if err != nil {
-			log.WithError(err).Error("failed to create paxos election client")
-			continue
-		}
-
-		electionClients[id] = pb.NewElectionClient(c)
-	}
-
 	return &Sender{
-		mu:          &sync.RWMutex{},
-		config:      config,
-		sendTimeout: time.Duration(config.Grpc.SendTimeoutMs) * time.Millisecond,
-		maxRetries:  config.Grpc.MaxRetries,
-		otherNodes:  electionClients,
-		pool:        pool,
+		config: config,
+		conns:  make(map[string]*grpc.ClientConn),
+		mu:     sync.RWMutex{}, // Non-Necessary, 0-value is fine
 	}
 }
 
-// Broadcast sends a message to all other nodes
-func (s *Sender) Broadcast(method string, message proto.Message) {
-	log.WithField("method", method).Debug("broadcast paxos election message")
-	for id := range s.otherNodes {
-		s.SendRPCToPeer(id, method, message)
-	}
-}
-
-// SendRPCToPeer sends a message to a specific peer with retry logic
-func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Message) {
-	go func() {
-		for i := 0; i < s.maxRetries; i++ {
-			if err := s.sendRPCToPeer(s.otherNodes[peerID], method, message); err == nil {
-				log.WithField("method", method).WithField("peer", peerID).Debug("paxos election message sent")
-				monitoring.MessageStatusCounter.WithLabelValues(s.config.Id, peerID, method, "success").Inc()
-				return
-			} else {
-				monitoring.MessageStatusCounter.WithLabelValues(s.config.Id, peerID, method, err.Error()).Inc()
-			}
-		}
-	}()
-}
-
-// sendRPCToPeer performs the actual gRPC call to a peer
-func (s *Sender) sendRPCToPeer(client pb.ElectionClient, method string, message proto.Message) error {
-	if client == nil {
-		log.Error("paxos election client is nil")
-		return fmt.Errorf("nil paxos election client")
+func (s *Sender) getClient(id string) (pb.PaxosElectionClient, error) {
+	// 1 Check Whether Connection Exists, if so, return the client
+	s.mu.RLock()
+	conn, ok := s.conns[id]
+	s.mu.RUnlock()
+	if ok {
+		return pb.NewPaxosElectionClient(conn), nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), s.sendTimeout)
+	// 2 If Not, Establish Connection
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 2.1 Double Check Whether Connection Exists
+	// As in Execution Interval, Other Threads might have established the connection, so we need to check again
+	if conn, ok = s.conns[id]; ok {
+		return pb.NewPaxosElectionClient(conn), nil
+	}
+
+	// 2.2 Establish Connection
+	address := s.config.GetAddress(id)
+	if address == nil {
+		return nil, fmt.Errorf("no address found for replica %s", id)
+	}
+	// Specific to Leader Election Port (Original Port + 2000)
+	address.Port += 2000
+
+	conn, err := grpc.NewClient(
+		fmt.Sprintf("%s:%d", address.Host, address.Port),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to replica %s: %v", id, err)
+	}
+
+	s.conns[id] = conn
+	return pb.NewPaxosElectionClient(conn), nil
+}
+
+func (s *Sender) SendPaxosPrepare(targetId string, req *pb.PaxosPrepareRequest) error {
+	client, err := s.getClient(targetId)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	switch method {
-	case "PaxosPrepare":
-		if _, err := client.PaxosPrepare(ctx, message.(*pb.PaxosPrepareRequest)); err != nil {
-			monitoring.ErrorCounter.WithLabelValues("paxos_sender", "SendRPCToPeer-PaxosPrepare", err.Error()).Inc()
-			return err
-		}
-	case "PaxosAccept":
-		if _, err := client.PaxosAccept(ctx, message.(*pb.PaxosAcceptRequest)); err != nil {
-			monitoring.ErrorCounter.WithLabelValues("paxos_sender", "SendRPCToPeer-PaxosAccept", err.Error()).Inc()
-			return err
-		}
-	case "PaxosLearn":
-		if _, err := client.PaxosLearn(ctx, message.(*pb.PaxosLearnRequest)); err != nil {
-			monitoring.ErrorCounter.WithLabelValues("paxos_sender", "SendRPCToPeer-PaxosLearn", err.Error()).Inc()
-			return err
-		}
-	case "GetElectionStatus":
-		if _, err := client.GetElectionStatus(ctx, message.(*pb.ElectionStatusRequest)); err != nil {
-			monitoring.ErrorCounter.WithLabelValues("paxos_sender", "SendRPCToPeer-GetElectionStatus", err.Error()).Inc()
-			return err
-		}
-	default:
-		monitoring.ErrorCounter.WithLabelValues("paxos_sender", "SendRPCToPeer-UnknownMethod", method).Inc()
-		return fmt.Errorf("unknown paxos election method %s", method)
+	_, err = client.PaxosPrepare(ctx, req)
+	if err != nil {
+		log.WithError(err).WithField("target", targetId).Error("failed to send paxos-prepare request")
+		monitoring.ErrorCounter.WithLabelValues("paxos-prepare", "SendPaxosPrepare", "grpc_error").Inc()
+		return err
 	}
 
+	return nil
+}
+
+func (s *Sender) SendPaxosAccept(targetId string, req *pb.PaxosAcceptRequest) error {
+	client, err := s.getClient(targetId)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err = client.PaxosAccept(ctx, req)
+	if err != nil {
+		log.WithError(err).WithField("target", targetId).Error("failed to send paxos-accept request")
+		monitoring.ErrorCounter.WithLabelValues("paxos-accept", "SendPaxosAccept", "grpc_error").Inc()
+		return err
+	}
+
+	return nil
+}
+
+func (s *Sender) SendPaxosSuccess(targetId string, req *pb.PaxosSuccessRequest) error {
+	client, err := s.getClient(targetId)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err = client.PaxosSuccess(ctx, req)
+	if err != nil {
+		log.WithError(err).WithField("target", targetId).Error("failed to send paxos-success request")
+		monitoring.ErrorCounter.WithLabelValues("paxos-success", "SendPaxosSuccess", "grpc_error").Inc()
+		return err
+	}
+
+	return nil
+}
+
+func (s *Sender) SendPaxosPromise(targetId string, req *pb.PaxosPromiseRequest) error {
+	client, err := s.getClient(targetId)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err = client.PaxosPromise(ctx, req)
+	if err != nil {
+		log.WithError(err).WithField("target", targetId).Error("failed to send paxos-promise request")
+		monitoring.ErrorCounter.WithLabelValues("paxos-promise", "SendPaxosPromise", "grpc_error").Inc()
+		return err
+	}
+
+	return nil
+}
+
+func (s *Sender) Broadcast(msgType string, message proto.Message) error {
+	for _, replicaId := range s.config.ReplicaIds() {
+		if replicaId == s.config.Id {
+			continue
+		}
+		switch msgType {
+		case "paxos-prepare":
+			s.SendPaxosPrepare(replicaId, message.(*pb.PaxosPrepareRequest))
+		case "paxos-accept":
+			s.SendPaxosAccept(replicaId, message.(*pb.PaxosAcceptRequest))
+		default:
+			return fmt.Errorf("invalid message type: %s", msgType)
+		}
+	}
+	return nil
+}
+
+func (s *Sender) SendRPCToPeer(id string, msgType string, message proto.Message) error {
+	switch msgType {
+	case "paxos-prepare":
+		s.SendPaxosPrepare(id, message.(*pb.PaxosPrepareRequest))
+	case "paxos-promise":
+		s.SendPaxosPromise(id, message.(*pb.PaxosPromiseRequest))
+	case "paxos-accept":
+		s.SendPaxosAccept(id, message.(*pb.PaxosAcceptRequest))
+	case "paxos-success":
+		s.SendPaxosSuccess(id, message.(*pb.PaxosSuccessRequest))
+	default:
+		return fmt.Errorf("invalid message type: %s", msgType)
+	}
 	return nil
 }
