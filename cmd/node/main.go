@@ -3,7 +3,7 @@ package main
 import (
 	// Standard library imports
 
-	"github.com/Arman17Babaei/pbft/pbft/leader_election"
+	"github.com/Arman17Babaei/pbft/pbft/leader_election/roundrobin"
 	// Third party imports
 	"github.com/alecthomas/kong"
 	log "github.com/sirupsen/logrus"
@@ -87,7 +87,7 @@ func startNode(config configs.Config) {
 	node := pbft.NewNode(&config, pbftSender, channels.input, channels.request,
 		channels.enable, channels.disable, store)
 
-	leaderElection := leader_election.NewRoundRobinLeaderElection(&config)
+	leaderElection := roundrobin.NewLeaderElection(&config)
 	viewChanger := setupViewChanger(&config, store, viewChangeSender, node, leaderElection)
 	node.SetViewChanger(viewChanger)
 
@@ -131,5 +131,6 @@ func startServices(config configs.Config, channels nodeChannels,
 	go viewChanger.Run(channels.viewChange)
 	go service.Serve()
 	go viewChangeService.Serve()
+	go viewChanger.LeaderElectionServe()
 	go monitoring.ServeMetrics(&config)
 }
