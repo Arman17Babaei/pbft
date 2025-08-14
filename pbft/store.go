@@ -79,6 +79,9 @@ func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointReque
 }
 
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	log.WithField("checkpoint", checkpoint.String()).Debug("adding checkpoint request to store")
 
 	if checkpoint.SequenceNumber < s.GetLastStableCheckpoint().GetSequenceNumber() {
@@ -102,21 +105,25 @@ func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
 }
 
 func (s *Store) AddRequests(sequenceNumber int64, reqs []*pb.ClientRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	log.WithField("sequence-number", sequenceNumber).Debug("adding requests to store")
 	s.requests[sequenceNumber] = reqs
 }
 
-func (s *Store) Commit(commit *pb.CommitRequest) ([]*pb.ClientRequest, []*pb.OperationResult, []*pb.CheckpointRequest) {
-	log.WithField("request", commit.String()).Debug("committing request")
+func (s *Store) Commit(seqNo int64) ([]*pb.ClientRequest, []*pb.OperationResult, []*pb.CheckpointRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	s.committedRequests[commit.SequenceNumber] = s.requests[commit.SequenceNumber]
+	s.committedRequests[seqNo] = s.requests[seqNo]
 
 	var reqs []*pb.ClientRequest
 	var results []*pb.OperationResult
 	var checkpoints []*pb.CheckpointRequest
 
-	monitoring.ExecutedRequestsGauge.WithLabelValues(s.config.Id).Set(float64(s.lastAppliedSequenceNumber))
 	for ; s.committedRequests[s.lastAppliedSequenceNumber+1] != nil; s.lastAppliedSequenceNumber++ {
+		monitoring.ExecutedRequestsGauge.WithLabelValues(s.config.Id).Set(float64(s.lastAppliedSequenceNumber))
 		requests := s.requests[s.lastAppliedSequenceNumber+1]
 		reqs = append(reqs, requests...)
 
