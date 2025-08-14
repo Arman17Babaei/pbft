@@ -36,6 +36,9 @@ func NewTransactionState(config *configs.Config, preparedCallback func(*pb.Commi
 }
 
 func (t *TransactionState) AddPrePrepare(preprepare *pb.PrePrepareRequest) *TransactionState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	if t.digest != preprepare.RequestDigest {
 		log.WithFields(log.Fields{"current": t.digest, "message": preprepare.RequestDigest}).Error("preprepare digest mismatch")
 		t.digest = preprepare.RequestDigest
@@ -60,6 +63,13 @@ func (t *TransactionState) AddPrePrepare(preprepare *pb.PrePrepareRequest) *Tran
 	t.preprepare = preprepare
 	go t.checkCallbacks()
 	return t
+}
+
+func (t *TransactionState) AddToStore(storeCallback func(int64, []*pb.ClientRequest), msgs []*pb.ClientRequest) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	storeCallback(t.preprepare.SequenceNumber, msgs)
 }
 
 func (t *TransactionState) AddPrepare(prepare *pb.PrepareRequest) *TransactionState {

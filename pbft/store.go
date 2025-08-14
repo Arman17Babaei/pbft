@@ -79,6 +79,9 @@ func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointReque
 }
 
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	log.WithField("checkpoint", checkpoint.String()).Debug("adding checkpoint request to store")
 
 	if checkpoint.SequenceNumber < s.GetLastStableCheckpoint().GetSequenceNumber() {

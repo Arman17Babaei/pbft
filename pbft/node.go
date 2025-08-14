@@ -177,9 +177,6 @@ func (n *Node) handleInput(input proto.Message) {
 }
 
 func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-
 	timer := prometheus.NewTimer(monitoring.ResponseTimeSummary.WithLabelValues(n.config.Id, "client-request"))
 	defer timer.ObserveDuration()
 
@@ -206,6 +203,8 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 		return
 	}
 
+	// --- MUTEX
+	n.mu.Lock()
 	n.ViewData.LastSequenceNumber++
 	n.ViewData.InProgressRequests[n.ViewData.LastSequenceNumber] = struct{}{}
 	monitoring.InProgressRequestsGauge.WithLabelValues(n.config.Id).Set(float64(len(n.ViewData.InProgressRequests)))
@@ -217,18 +216,19 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 		},
 		Requests: []*pb.ClientRequest{msg},
 	}
-	n.ViewData.TransactionStates[n.ViewData.LastSequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
-	go n.ViewData.TransactionStates[n.ViewData.LastSequenceNumber].AddPrePrepare(prepreareMessage.PrePrepareRequest)
+	txnState := NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
+	n.ViewData.TransactionStates[n.ViewData.LastSequenceNumber] = txnState
+	n.mu.Unlock()
+	// --- MUTEX
 
-	n.Store.AddRequests(n.ViewData.LastSequenceNumber, []*pb.ClientRequest{msg})
+	go txnState.AddPrePrepare(prepreareMessage.PrePrepareRequest).
+		AddToStore(n.Store.AddRequests, []*pb.ClientRequest{msg})
+
 	n.sender.Broadcast("PrePrepare", prepreareMessage)
 	monitoring.ClientRequestStatusCounter.WithLabelValues("success").Inc()
 }
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
 	log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.config.Id).Info("PrePrepare received")
 	if n.isPrimary() {
 		log.WithField("request", msg.String()).WithField("my-id", n.config.Id).Error("Received pre-prepare request but is primary")
@@ -248,13 +248,20 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 	}
 
 	sequenceNumber := msg.PrePrepareRequest.SequenceNumber
+
+	// --- MUTEX
+	n.mu.Lock()
 	n.ViewData.InProgressRequests[sequenceNumber] = struct{}{}
 	monitoring.InProgressRequestsGauge.WithLabelValues(n.config.Id).Set(float64(len(n.ViewData.InProgressRequests)))
-	if _, exists := n.ViewData.TransactionStates[sequenceNumber]; !exists {
-		n.ViewData.TransactionStates[sequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn).AddPrePrepare(msg.PrePrepareRequest)
+	txnState, exists := n.ViewData.TransactionStates[sequenceNumber]
+	if !exists {
+		txnState = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
+		n.ViewData.TransactionStates[sequenceNumber] = txnState
 	}
+	n.mu.Unlock()
+	// --- MUTEX
 
-	go n.ViewData.TransactionStates[sequenceNumber].AddPrePrepare(msg.PrePrepareRequest)
+	go txnState.AddPrePrepare(msg.PrePrepareRequest)
 
 	prepareMessage := &pb.PrepareRequest{
 		ViewId:         msg.PrePrepareRequest.ViewId,
@@ -263,15 +270,12 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 		ReplicaId:      n.config.Id,
 	}
 
-	go n.ViewData.TransactionStates[sequenceNumber].AddPrepare(prepareMessage)
+	go txnState.AddPrepare(prepareMessage)
 	n.Store.AddRequests(msg.PrePrepareRequest.SequenceNumber, msg.Requests)
 	n.sender.Broadcast("Prepare", prepareMessage)
 }
 
 func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
 	log.WithField("request", msg.String()).Info("Received prepare request")
 
 	if n.ViewData.IsInViewChange {
@@ -286,9 +290,15 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 
 	sequenceNumber := msg.SequenceNumber
 
-	if _, exists := n.ViewData.TransactionStates[sequenceNumber]; !exists {
-		n.ViewData.TransactionStates[sequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
+	// --- MUTEX
+	n.mu.Lock()
+	txnState, exists := n.ViewData.TransactionStates[sequenceNumber]
+	if !exists {
+		txnState = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
+		n.ViewData.TransactionStates[sequenceNumber] = txnState
 	}
+	n.mu.Unlock()
+	// --- MUTEX
 
 	go n.ViewData.TransactionStates[sequenceNumber].AddPrepare(msg)
 }
@@ -299,9 +309,6 @@ func (n *Node) handlePreparedTxn(commitMessage *pb.CommitRequest) {
 }
 
 func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-
 	log.WithField("request", msg.String()).Info("Received commit request")
 
 	if n.ViewData.IsInViewChange {
@@ -316,11 +323,17 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 
 	sequenceNumber := msg.SequenceNumber
 
-	if _, exists := n.ViewData.TransactionStates[sequenceNumber]; !exists {
-		n.ViewData.TransactionStates[sequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
+	// --- MUTEX
+	n.mu.Lock()
+	txnState, exists := n.ViewData.TransactionStates[sequenceNumber]
+	if !exists {
+		txnState = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
+		n.ViewData.TransactionStates[sequenceNumber] = txnState
 	}
+	n.mu.Unlock()
+	// --- MUTEX
 
-	go n.ViewData.TransactionStates[sequenceNumber].AddCommit(msg)
+	go txnState.AddCommit(msg)
 }
 
 func (n *Node) handleCommittedTxn(sequenceNumber int64) {
