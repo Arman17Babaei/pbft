@@ -102,11 +102,16 @@ func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
 }
 
 func (s *Store) AddRequests(sequenceNumber int64, reqs []*pb.ClientRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	log.WithField("sequence-number", sequenceNumber).Debug("adding requests to store")
 	s.requests[sequenceNumber] = reqs
 }
 
 func (s *Store) Commit(seqNo int64) ([]*pb.ClientRequest, []*pb.OperationResult, []*pb.CheckpointRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	s.committedRequests[seqNo] = s.requests[seqNo]
 

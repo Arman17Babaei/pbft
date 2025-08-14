@@ -217,7 +217,8 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 		},
 		Requests: []*pb.ClientRequest{msg},
 	}
-	n.ViewData.TransactionStates[n.ViewData.LastSequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn).AddPrePrepare(prepreareMessage.PrePrepareRequest)
+	n.ViewData.TransactionStates[n.ViewData.LastSequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
+	go n.ViewData.TransactionStates[n.ViewData.LastSequenceNumber].AddPrePrepare(prepreareMessage.PrePrepareRequest)
 
 	n.Store.AddRequests(n.ViewData.LastSequenceNumber, []*pb.ClientRequest{msg})
 	n.sender.Broadcast("PrePrepare", prepreareMessage)
@@ -225,8 +226,8 @@ func (n *Node) handleClientRequest(msg *pb.ClientRequest) {
 }
 
 func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
+	n.mu.Lock()
+	defer n.mu.Unlock()
 
 	log.WithField("id", msg.PrePrepareRequest.SequenceNumber).WithField("my-id", n.config.Id).Info("PrePrepare received")
 	if n.isPrimary() {
@@ -253,7 +254,7 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 		n.ViewData.TransactionStates[sequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn).AddPrePrepare(msg.PrePrepareRequest)
 	}
 
-	n.ViewData.TransactionStates[sequenceNumber].AddPrePrepare(msg.PrePrepareRequest)
+	go n.ViewData.TransactionStates[sequenceNumber].AddPrePrepare(msg.PrePrepareRequest)
 
 	prepareMessage := &pb.PrepareRequest{
 		ViewId:         msg.PrePrepareRequest.ViewId,
@@ -262,7 +263,7 @@ func (n *Node) handlePrePrepareRequest(msg *pb.PiggyBackedPrePareRequest) {
 		ReplicaId:      n.config.Id,
 	}
 
-	n.ViewData.TransactionStates[sequenceNumber].AddPrepare(prepareMessage)
+	go n.ViewData.TransactionStates[sequenceNumber].AddPrepare(prepareMessage)
 	n.Store.AddRequests(msg.PrePrepareRequest.SequenceNumber, msg.Requests)
 	n.sender.Broadcast("Prepare", prepareMessage)
 }
@@ -289,7 +290,7 @@ func (n *Node) handlePrepareRequest(msg *pb.PrepareRequest) {
 		n.ViewData.TransactionStates[sequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
 	}
 
-	n.ViewData.TransactionStates[sequenceNumber].AddPrepare(msg)
+	go n.ViewData.TransactionStates[sequenceNumber].AddPrepare(msg)
 }
 
 func (n *Node) handlePreparedTxn(commitMessage *pb.CommitRequest) {
@@ -319,7 +320,7 @@ func (n *Node) handleCommitRequest(msg *pb.CommitRequest) {
 		n.ViewData.TransactionStates[sequenceNumber] = NewTransactionState(n.config, n.handlePreparedTxn, n.handleCommittedTxn)
 	}
 
-	n.ViewData.TransactionStates[sequenceNumber].AddCommit(msg)
+	go n.ViewData.TransactionStates[sequenceNumber].AddCommit(msg)
 }
 
 func (n *Node) handleCommittedTxn(sequenceNumber int64) {
