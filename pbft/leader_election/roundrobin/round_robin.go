@@ -40,3 +40,7 @@ func (r *RoundRobin) Serve() error {
 func (r *RoundRobin) Stop() error {
 	return nil
 }
+
+func (r *RoundRobin) Start() error {
+	return nil
+}

@@ -520,7 +520,7 @@ func (p *PaxosElection) FindLeaderForView(viewId int64, callbackCh chan string) 
 		case leader := <-p.NewLeaderCh:
 			callbackCh <- leader
 		case <-time.After(p.electionTimeout):
-			callbackCh <- ""
+			callbackCh <- "timeout"
 		}
 	}()
 }
