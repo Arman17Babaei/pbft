@@ -189,6 +189,7 @@ func (s *Store) stabilizeCheckpoint(checkpoint *CheckpointProof) {
 	}
 
 	if s.lastAppliedSequenceNumber < checkpoint.proof[0].SequenceNumber {
+		monitoring.ErrorCounter.WithLabelValues("store", "stabilize-checkpoint", "skipped-seq-no").Add(float64(checkpoint.proof[0].SequenceNumber - s.lastAppliedSequenceNumber))
 		s.lastAppliedSequenceNumber = checkpoint.proof[0].SequenceNumber
 	}
 }
