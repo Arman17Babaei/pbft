@@ -3,9 +3,12 @@ package pbft
 import (
 	"context"
 	"fmt"
+	"google.golang.org/grpc/keepalive"
+	"net"
+	"time"
+
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
-	"net"
 
 	log "github.com/sirupsen/logrus"
 
@@ -46,7 +49,21 @@ func NewService(inputCh chan<- proto.Message, requestCh chan<- *pb.ClientRequest
 	}
 
 	grpc.WithTransportCredentials(insecure.NewCredentials())
-	service.grpcServer = grpc.NewServer()
+	// Many of these options are worthless, my apologies
+	service.grpcServer = grpc.NewServer(
+		grpc.MaxConcurrentStreams(2000),
+		grpc.InitialWindowSize(1<<20),
+		grpc.InitialConnWindowSize(1<<25),
+		grpc.ReadBufferSize(1<<20),
+		grpc.WriteBufferSize(1<<20),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:              2 * time.Minute,
+			Timeout:           20 * time.Second,
+			MaxConnectionIdle: 30 * time.Minute,
+		}),
+		grpc.MaxRecvMsgSize(50<<20),
+		grpc.MaxSendMsgSize(50<<20),
+	)
 	pb.RegisterPbftServer(service.grpcServer, service)
 
 	return service
@@ -119,30 +136,6 @@ func (s *Service) Checkpoint(_ context.Context, req *pb.CheckpointRequest) (*pb.
 	log.WithField("my-id", s.config.Id).WithField("request", req).Info("checkpoint request received")
 	s.inputCh <- req
 	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "checkpoint").Inc()
-
-	return &pb.Empty{}, nil
-}
-
-func (s *Service) ViewChange(_ context.Context, req *pb.ViewChangeRequest) (*pb.Empty, error) {
-	if !s.Enabled {
-		return &pb.Empty{}, nil
-	}
-
-	log.WithField("my-id", s.config.Id).WithField("niew-view", req.GetNewViewId()).Info("view-change request received")
-	s.inputCh <- req
-	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "view-change").Inc()
-
-	return &pb.Empty{}, nil
-}
-
-func (s *Service) NewView(_ context.Context, req *pb.NewViewRequest) (*pb.Empty, error) {
-	if !s.Enabled {
-		return &pb.Empty{}, nil
-	}
-
-	log.WithField("my-id", s.config.Id).WithField("new-view-id", req.NewViewId).WithField("leader-id", req.ReplicaId).Info("new-view request received")
-	s.inputCh <- req
-	monitoring.MessageCounter.WithLabelValues(req.GetReplicaId(), s.config.Id, "new-view").Inc()
 
 	return &pb.Empty{}, nil
 }

@@ -22,6 +22,7 @@ type Grpc struct {
 
 type Timers struct {
 	ViewChangeTimeoutMs int `mapstructure:"view_change_timeout_ms"`
+	RequestTimeoutMs    int `mapstructure:"request_timeout_ms"`
 }
 
 type General struct {
@@ -33,4 +34,22 @@ type General struct {
 
 func (c *Config) F() int {
 	return (len(c.PeersAddress) - 1) / 3
+}
+
+func (c *Config) GetAddress(id string) *Address {
+	if id == c.Id {
+		return c.Address
+	}
+	return c.PeersAddress[id]
+}
+
+func (c *Config) ReplicaIds() []string {
+	ids := make([]string, 0, len(c.PeersAddress)+1)
+	ids = append(ids, c.Id)
+	for id := range c.PeersAddress {
+		if id != c.Id {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

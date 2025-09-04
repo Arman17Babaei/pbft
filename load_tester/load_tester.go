@@ -2,6 +2,11 @@ package load_tester
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"time"
+
 	"github.com/Arman17Babaei/pbft/client"
 	loader "github.com/Arman17Babaei/pbft/config"
 	loadtestconfig "github.com/Arman17Babaei/pbft/load_tester/configs"
@@ -10,10 +15,6 @@ import (
 	"github.com/Arman17Babaei/pbft/pbft/configs"
 	pb "github.com/Arman17Babaei/pbft/proto"
 	log "github.com/sirupsen/logrus"
-	"os"
-	"os/exec"
-	"strconv"
-	"time"
 )
 
 type LoadTest struct {

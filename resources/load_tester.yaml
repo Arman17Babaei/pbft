@@ -1,6 +1,6 @@
 duration_seconds: 6000
-throughput_per_second: 1000
-num_clients: 10
+throughput_per_second: 1200
+num_clients: 50
 scenario: no_failure
 
 attacks:

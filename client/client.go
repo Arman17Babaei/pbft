@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"google.golang.org/grpc/keepalive"
 	"math/rand"
 	"net"
 	"sort"
@@ -103,7 +104,7 @@ func NewClient(config *Config) *Client {
 		log.WithError(err).Fatal("failed to listen")
 	}
 
-	client.grpcServer = grpc.NewServer(grpc.MaxConcurrentStreams(100))
+	client.grpcServer = grpc.NewServer(grpc.MaxConcurrentStreams(1000))
 	pb.RegisterClientServer(client.grpcServer, client)
 
 	client.nodeNames = make([]string, 0, len(config.NodesAddress))
@@ -116,7 +117,24 @@ func NewClient(config *Config) *Client {
 
 	for id, node := range config.NodesAddress {
 		target := fmt.Sprintf("%s:%d", node.Host, node.Port)
-		conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		// Many of these options are worthless, my apologies
+		conn, err := grpc.NewClient(target,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithInitialWindowSize(1<<20),
+			grpc.WithInitialConnWindowSize(1<<25),
+			grpc.WithReadBufferSize(1<<20),
+			grpc.WithWriteBufferSize(1<<20),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(50<<20),
+				grpc.MaxCallSendMsgSize(50<<20),
+			),
+			grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`),
+		)
 		if err != nil {
 			log.WithError(err).WithField("target", target).Error("error creating pbft client")
 		}
@@ -156,7 +174,7 @@ func (c *Client) SendRequest(op *pb.Operation, callback chan<- *pb.OperationResu
 
 	_, err := leaderClient.Request(ctx, clientRequest)
 	if err != nil {
-		log.WithError(err).Error("error sending request to leader")
+		log.WithError(err).Info("error sending request to leader")
 		return err
 	}
 
