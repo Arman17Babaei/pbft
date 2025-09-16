@@ -28,6 +28,8 @@ type Node interface {
 
 type LeaderElection interface {
 	FindLeaderForView(viewId int64, callbackCh chan string)
+	Serve() error
+	Stop() error
 }
 
 type PbftViewChange struct {
@@ -291,4 +293,20 @@ func getSequenceRange(viewChanges map[string]*pb.ViewChangeRequest) (int64, int6
 		}
 	}
 	return minSeq, maxSeq
+}
+
+func (p *PbftViewChange) LeaderElectionServe() error {
+	error := p.leaderElection.Serve()
+	if error != nil {
+		return error
+	}
+	return nil
+}
+
+func (p *PbftViewChange) LeaderElectionStop() error {
+	error := p.leaderElection.Stop()
+	if error != nil {
+		return error
+	}
+	return nil
 }

@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package pbft;
+option go_package = ".";
+
+import "general.proto";
+import "electionGeneral.proto";
+
+// ==================== gRPC Service Definition ====================
+service RaftElection {
+    // Prepare Phase
+    rpc RaftPrepare(RaftPrepareRequest) returns (Empty);
+    rpc RaftPromise(RaftPromiseRequest) returns (Empty);
+
+    // Accept Phase
+    rpc RaftAccept(RaftAcceptRequest) returns (Empty);
+    rpc RaftSuccess(RaftSuccessRequest) returns (Empty);
+
+    // Status and Control
+    rpc GetElectionStatus(ElectionStatusRequest) returns (Empty);
+    rpc Enable(Empty) returns (Empty);
+    rpc Disable(Empty) returns (Empty);
+}
+
+// ==================== gRPC Message Definition ====================
+message RaftPrepareRequest {
+    int64 term = 1;                    // Current term number
+    int64 proposal_id = 2;             // Unique proposal identifier
+    string proposer_id = 3;            // ID of the proposing node
+    string proposed_value = 4;
+    int64 view_id = 5;                 // View ID (should be same as term)
+    int64 timestamp = 6;               // Timestamp for timeout handling
+}
+
+message RaftPromiseRequest {
+    int64 term = 1;                    // Current term number
+    bool promised = 2;                 // Whether the prepare is accepted
+    string acceptor_id = 3;            // ID of the accepting node
+    int64 view_id = 4;                 // View ID
+    int64 last_accepted_proposal_id = 5; // Last accepted proposal ID
+    string last_accepted_value = 6;    // Last accepted leader value
+    int64 timestamp = 7;               // Timestamp
+}
+
+message RaftAcceptRequest {
+    int64 term = 1;                    // Current term number
+    int64 proposal_id = 2;             // Proposal identifier
+    string proposer_id = 3;            // ID of the proposing node
+    string proposed_value = 4;
+    int64 view_id = 5;                 // View ID
+    int64 timestamp = 6;               // Timestamp
+}
+
+message RaftSuccessRequest {
+    int64 term = 1;                    // Current term number
+    bool success = 2;                  // Whether the accept is successful
+    string acceptor_id = 3;            // ID of the accepting node
+    int64 view_id = 4;                 // View ID
+    int64 timestamp = 5;               // Timestamp
+}
+

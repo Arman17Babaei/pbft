@@ -30,3 +30,6 @@ go.work.sum
 log_*
 
 .idea/
+
+# proto generated files
+proto/*.pb.go

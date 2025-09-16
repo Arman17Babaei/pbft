@@ -2,8 +2,8 @@
 
 ## Execution
 ```
-./compile-protos.sh
-go run github.com/Arman17Babaei/pbft/cmd/load_test
+make up
+make test
 ```
 
 ## Monitoring
