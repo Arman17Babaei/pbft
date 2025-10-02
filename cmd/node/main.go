@@ -3,7 +3,9 @@ package main
 import (
 	// Standard library imports
 
-	"github.com/Arman17Babaei/pbft/pbft/leader_election"
+	"os"
+	"time"
+
 	// Third party imports
 	"github.com/alecthomas/kong"
 	log "github.com/sirupsen/logrus"
@@ -13,6 +15,7 @@ import (
 	"github.com/Arman17Babaei/pbft/config"
 	"github.com/Arman17Babaei/pbft/pbft"
 	"github.com/Arman17Babaei/pbft/pbft/configs"
+	"github.com/Arman17Babaei/pbft/pbft/leader_election"
 	"github.com/Arman17Babaei/pbft/pbft/monitoring"
 	"github.com/Arman17Babaei/pbft/pbft/view_changer"
 	pb "github.com/Arman17Babaei/pbft/proto"
@@ -25,6 +28,11 @@ type CLI struct {
 
 func main() {
 	log.SetLevel(log.ErrorLevel)
+	log.SetOutput(os.Stdout)
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp:   true,
+		TimestampFormat: time.TimeOnly,
+	})
 	var cli CLI
 	kong.Parse(&cli)
 
