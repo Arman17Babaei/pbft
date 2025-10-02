@@ -69,11 +69,14 @@ func (s *Sender) Broadcast(method string, message proto.Message) {
 }
 
 func (s *Sender) SendRPCToPeer(peerID string, method string, message proto.Message) {
+	if peerID == s.config.Id {
+		log.WithField("peer", peerID).Error("skipping self")
+		return
+	}
 	go func() {
 		for i := 0; i < s.maxRetries; i++ {
 			if _, exists := s.otherNodes[peerID]; !exists {
-				log.WithField("peer", peerID).Error("unknown peer")
-				panic("unknown peer")
+				log.WithField("peer", peerID).Fatal("unknown peer")
 				return
 			}
 			if err := s.sendRPCToPeer(s.otherNodes[peerID], method, message); err == nil {

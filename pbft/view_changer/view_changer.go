@@ -2,8 +2,8 @@ package view_changer
 
 import (
 	"maps"
-	"math"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -49,6 +49,7 @@ type PbftViewChange struct {
 	currentViewChangeTimeout time.Duration
 	viewTimer                *time.Timer
 
+	mu          sync.RWMutex
 	viewChanges map[int64]map[string]*pb.ViewChangeRequest
 }
 
@@ -127,18 +128,20 @@ func (p *PbftViewChange) runTimer() {
 
 func (p *PbftViewChange) handleViewChange(msg *pb.ViewChangeRequest) {
 	viewId := msg.NewViewId
-	log.WithField("my-id", p.id).WithField("backup id", msg.ReplicaId).Error("received view change request")
+	log.WithField("my-id", p.id).WithField("backup id", msg.ReplicaId).Info("received view change request")
 
 	if viewId < p.viewId.Load() {
 		log.WithField("request", msg.String()).WithField("current-view", p.viewId.Load()).Warn("Received view change request with old view")
 		return
 	}
 
+	p.mu.Lock()
 	if _, ok := p.viewChanges[viewId]; !ok {
 		p.viewChanges[viewId] = make(map[string]*pb.ViewChangeRequest)
 	}
 	p.viewChanges[viewId][msg.ReplicaId] = msg
-	log.WithField("backup id", msg.ReplicaId).WithField("len", len(p.viewChanges[viewId])).Error("applied view change message")
+	log.WithField("backup id", msg.ReplicaId).WithField("len", len(p.viewChanges[viewId])).Info("applied view change message")
+	p.mu.Unlock()
 
 	if p.leaderForView != p.id {
 		log.WithField("request", msg.String()).Debug("Received view change request but not leader for view yet")
@@ -157,7 +160,7 @@ func (p *PbftViewChange) handleNewView(msg *pb.NewViewRequest) {
 }
 
 func (p *PbftViewChange) voteViewChange(viewId int64) {
-	log.WithField("node id", p.id).Error("view changing")
+	log.WithField("node-id", p.id).WithField("view-id", viewId).Error("view changing")
 	stableCheckpoint := p.store.GetLastStableCheckpoint()
 	viewChangeRequest := &pb.ViewChangeRequest{
 		NewViewId:                viewId,
@@ -176,8 +179,10 @@ func (p *PbftViewChange) tryAnnounceAsLeader(viewId int64) {
 		log.WithField("viewId", viewId).WithField("currentId", p.viewId.Load()).Warn("trying to become leader on different view")
 		return
 	}
-	if len(p.viewChanges[viewId]) < 2*p.config.F()+1 {
-		log.WithField("viewId", viewId).WithField("viewChanges", len(p.viewChanges[viewId])).Info("too soon to announce as leader")
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.viewChanges[viewId]) != 2*p.config.F()+1 {
+		log.WithField("viewId", viewId).WithField("viewChanges", len(p.viewChanges[viewId])).Info("not the time to announce as leader")
 		return
 	}
 
@@ -188,12 +193,14 @@ func (p *PbftViewChange) tryAnnounceAsLeader(viewId int64) {
 		ReplicaId:       p.id,
 	}
 	p.sender.Broadcast("NewView", newViewMessage)
-	log.WithField("my-id", p.id).Error("broadcasted new view message")
+	log.WithField("my-id", p.id).WithField("requests", len(p.viewChanges[viewId])).Error("broadcasted new view message")
 
 	p.handleNewView(newViewMessage)
 }
 
 func (p *PbftViewChange) createPreprepareMessages(viewId int64) []*pb.PrePrepareRequest {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	viewChanges := p.viewChanges[viewId]
 	minSeq, maxSeq := getSequenceRange(viewChanges)
 	log.WithField("min", minSeq).WithField("max", maxSeq).WithField("view", viewId).Error("sequence range for new view")
@@ -275,11 +282,11 @@ func getSequenceRange(viewChanges map[string]*pb.ViewChangeRequest) (int64, int6
 		log.Fatal("no view change for sequence range")
 	}
 
-	minSeq := int64(math.MaxInt64)
+	minSeq := int64(0)
 	maxSeq := int64(0)
 
 	for _, viewChange := range viewChanges {
-		if viewChange.LastStableSequenceNumber < minSeq {
+		if viewChange.LastStableSequenceNumber > minSeq {
 			minSeq = viewChange.LastStableSequenceNumber
 		}
 		if viewChange.LastStableSequenceNumber > maxSeq {

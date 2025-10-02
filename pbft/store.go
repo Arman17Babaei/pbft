@@ -13,12 +13,11 @@ import (
 )
 
 type CheckpointProof struct {
-	mu    sync.RWMutex
 	proof []*pb.CheckpointRequest
 }
 
 func (cpp *CheckpointProof) GetSequenceNumber() int64 {
-	if cpp == nil {
+	if cpp == nil || len(cpp.proof) == 0 {
 		return 0
 	}
 
@@ -70,15 +69,6 @@ func (s *Store) GetLastStableCheckpoint() *CheckpointProof {
 	return s.lastStableCheckpoint
 }
 
-func (s *Store) UpdateLastStableCheckpoint(checkpointProof []*pb.CheckpointRequest) {
-	if s.lastStableCheckpoint == nil || s.lastStableCheckpoint.GetSequenceNumber() < checkpointProof[0].SequenceNumber {
-		s.lastStableCheckpoint = &CheckpointProof{proof: checkpointProof}
-	}
-	if s.lastAppliedSequenceNumber < checkpointProof[0].SequenceNumber {
-		s.lastAppliedSequenceNumber = checkpointProof[0].SequenceNumber
-	}
-}
-
 func (s *Store) AddCheckpointRequest(checkpoint *pb.CheckpointRequest) *int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -123,8 +113,8 @@ func (s *Store) Commit(seqNo int64) ([]*pb.ClientRequest, []*pb.OperationResult,
 		monitoring.ErrorCounter.WithLabelValues("store", "commit", "skipped-seq-no").Inc()
 	}
 
-	if s.lastAppliedSequenceNumber < seqNo-100 {
-		log.WithField("seq-no", seqNo).WithField("last-applied", s.lastAppliedSequenceNumber).Error("committing a sequence number far ahead of last applied")
+	if s.lastAppliedSequenceNumber < seqNo-int64(s.config.General.CheckpointInterval) {
+		log.WithField("seq-no", seqNo).WithField("last-applied", s.lastAppliedSequenceNumber).WithField("my-id", s.config.Id).Error("committing far ahead of last applied")
 	}
 
 	var reqs []*pb.ClientRequest
@@ -163,9 +153,20 @@ func (s *Store) Commit(seqNo int64) ([]*pb.ClientRequest, []*pb.OperationResult,
 	return reqs, results, checkpoints
 }
 
-func (s *Store) Rollback(toSeqNo int64) {
+func (s *Store) Rollback(checkPointProof []*pb.CheckpointRequest) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if len(checkPointProof) == 0 {
+		s.unstableCheckpoints = make(map[CheckpointId]*CheckpointProof)
+		s.lastStableCheckpoint = &CheckpointProof{proof: checkPointProof}
+		s.lastAppliedSequenceNumber = 0
+		s.committedRequests = make(map[int64][]*pb.ClientRequest)
+		monitoring.ExecutedRequestsGauge.WithLabelValues(s.config.Id).Set(float64(0))
+		return
+	}
+
+	toSeqNo := checkPointProof[0].SequenceNumber
 
 	if toSeqNo >= s.lastSentResultSequenceNumber {
 		// This needs to get information from other replicas to get state
@@ -173,7 +174,11 @@ func (s *Store) Rollback(toSeqNo int64) {
 	}
 
 	// This needs to rollback state as well
+	s.unstableCheckpoints = make(map[CheckpointId]*CheckpointProof)
+	s.lastStableCheckpoint = &CheckpointProof{proof: checkPointProof}
 	s.lastAppliedSequenceNumber = toSeqNo
+	s.committedRequests = make(map[int64][]*pb.ClientRequest)
+	monitoring.ExecutedRequestsGauge.WithLabelValues(s.config.Id).Set(float64(toSeqNo))
 }
 
 func (s *State) digest() string {
